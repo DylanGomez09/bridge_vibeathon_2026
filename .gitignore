@@ -1,0 +1,30 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# environment (para backend/.env)
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# build output
+dist/
+dist-ssr/
+*.tsbuildinfo
+
+# logs
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# editor / os
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# misc
+*.local
+coverage/

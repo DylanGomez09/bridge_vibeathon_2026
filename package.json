@@ -1,0 +1,20 @@
+{
+  "name": "bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "BRIDGE - transcripción y traducción en tiempo real (EN->ES) para conferencias con Gemini Live API",
+  "scripts": {
+    "dev": "concurrently -k -n backend,frontend -c blue,green \"pnpm --filter @bridge/backend dev\" \"pnpm --filter @bridge/frontend dev\"",
+    "build": "pnpm --filter @bridge/backend build && pnpm --filter @bridge/frontend build",
+    "test:connection": "pnpm --filter @bridge/backend test:connection"
+  },
+"devDependencies": {
+    "concurrently": "^9.1.2"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  },
+  "packageManager": "pnpm@10.15.1"
+}

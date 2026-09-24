@@ -10,7 +10,8 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
     "start": "node dist/src/server.js",
-    "test:connection": "tsx test-connection.ts"
+    "test:connection": "tsx test-connection.ts",
+    "test:pipeline": "tsx test-pipeline.ts"
   },
   "dependencies": {
     "@google/genai": "^2.24.0",

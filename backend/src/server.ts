@@ -2,6 +2,7 @@ import http from "node:http";
 import express from "express";
 import { WebSocketServer } from "ws";
 import { loadConfig } from "./config.js";
+import { registerWsHandlers } from "./ws/handler.js";
 
 const config = loadConfig();
 
@@ -15,12 +16,15 @@ app.get("/health", (_req, res) => {
     service: "bridge-backend",
     hasGeminiKey: Boolean(config.geminiApiKey),
     geminiLiveModel: config.geminiLiveModel,
+    bridge: {
+      responseModality: config.bridgeResponseModality,
+      sourceLang: config.bridgeSourceLang,
+      targetLang: config.bridgeTargetLang,
+    },
   });
 });
 
-wss.on("connection", (ws) => {
-  ws.send(JSON.stringify({ type: "hello", service: "bridge-backend" }));
-});
+registerWsHandlers(wss, config);
 
 server.listen(config.port, () => {
   console.log(`[bridge] backend escuchando en http://localhost:${config.port}`);

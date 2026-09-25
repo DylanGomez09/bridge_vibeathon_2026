@@ -16,7 +16,8 @@ export interface TranscriberCallbacks {
 }
 
 const PCM_MIME = "audio/pcm;rate=16000";
-const MIN_CHUNK_INTERVAL_MS = 75;
+const MIN_CHUNK_INTERVAL_MS = 15;
+const DEBUG = process.env.BRIDGE_DEBUG === "1";
 
 export class Transcriber {
   private session: Session | null = null;
@@ -25,6 +26,14 @@ export class Transcriber {
   private lastSentAt = 0;
   private accumulatedOutput = "";
   private ended = false;
+  private receivedChunks = 0;
+  private receivedBytes = 0;
+  private readonly startMs = Date.now();
+  private lastCountLogAt = 0;
+
+  private dbg(...args: unknown[]): void {
+    if (DEBUG) console.log(`[tscriber-verbose][+${Date.now() - this.startMs}ms]`, ...args);
+  }
 
   constructor(
     private readonly ai: GoogleGenAI,
@@ -65,27 +74,53 @@ export class Transcriber {
     }
 
     this.callbacks.onStatus?.("connecting");
+    this.dbg(
+      "connecting a Gemini Live (model:",
+      this.config.geminiLiveModel,
+      ", modality:",
+      modality,
+      ")",
+    );
     this.session = await this.ai.live.connect({
       model: this.config.geminiLiveModel,
       config: liveConfig,
       callbacks: {
-        onopen: () => undefined,
+        onopen: () => this.dbg("socket Gemini abierto"),
         onmessage: (message) => this.handleMessage(message),
         onerror: (error) => {
           const detail = `${error?.message ?? "error desconocido"} (${error?.type ?? "tipo desconocido"})`;
+          this.dbg("socket Gemini onerror:", detail);
           this.callbacks.onError?.(detail);
           this.callbacks.onStatus?.("error", detail);
         },
         onclose: (event) => {
           const detail = `close ${event.code}${event.reason ? ` — ${event.reason}` : ""}`;
+          this.dbg("socket Gemini onclose:", event.code, event.reason ?? "");
           if (!this.ended) this.callbacks.onStatus?.("ended", detail);
           this.callbacks.onClose?.(event.code, event.reason ?? "");
         },
       },
     });
+    this.dbg("session Gemini establecida");
   }
 
   sendAudio(data: Buffer): void {
+    const chunkIndex = this.receivedChunks + 1;
+    this.receivedChunks += 1;
+    this.receivedBytes += data.length;
+    if (chunkIndex === 1) {
+      this.dbg("primer chunk recibido del client (chunk 1,", data.length, "bytes)");
+    }
+    const now = Date.now();
+    if (now - this.lastCountLogAt >= 10_000) {
+      this.lastCountLogAt = now;
+      this.dbg(
+        "recuento: chunks recibidos del client:",
+        this.receivedChunks,
+        " bytes:",
+        this.receivedBytes,
+      );
+    }
     if (!this.session) {
       this.queue.push(data);
       return;
@@ -95,6 +130,13 @@ export class Transcriber {
   }
 
   endTurn(): void {
+    this.dbg(
+      ">> audioStreamEnd (chunks recibidos del client:",
+      this.receivedChunks,
+      " bytes:",
+      this.receivedBytes,
+      ")",
+    );
     this.session?.sendRealtimeInput({ audioStreamEnd: true });
   }
 
@@ -144,12 +186,29 @@ export class Transcriber {
 
   private handleMessage(message: LiveServerMessage): void {
     if (message.setupComplete) {
+      this.dbg(">> setupComplete (sesión lista)");
       this.callbacks.onStatus?.("ready");
       this.pump();
       return;
     }
 
     const content = message.serverContent;
+    if (content) {
+      this.dbg(">> serverContent", {
+        interim: content.interimInputTranscription?.text,
+        input: content.inputTranscription?.text,
+        output: content.outputTranscription?.text,
+        modelTurnText: (content.modelTurn?.parts ?? [])
+          .filter((part) => part.text)
+          .map((part) => part.text)
+          .join(""),
+        turnComplete: content.turnComplete ?? false,
+        generationComplete: content.generationComplete ?? false,
+        interrupted: content.interrupted ?? false,
+        waitingForInput: content.waitingForInput ?? false,
+      });
+    }
+
     if (!content) return;
 
     if (content.interimInputTranscription?.text) {
@@ -161,7 +220,10 @@ export class Transcriber {
 
     if (this.config.bridgeResponseModality === "audio") {
       if (content.outputTranscription?.text) {
-        this.callbacks.onTranslation?.(content.outputTranscription.text);
+        this.accumulatedOutput = this.mergeText(
+          this.accumulatedOutput,
+          content.outputTranscription.text,
+        );
       }
     } else {
       const textParts = (content.modelTurn?.parts ?? [])
@@ -169,11 +231,14 @@ export class Transcriber {
         .map((part) => part.text);
       if (textParts.length > 0) {
         this.accumulatedOutput = this.mergeText(this.accumulatedOutput, textParts.join(""));
-        this.callbacks.onTranslation?.(this.accumulatedOutput);
       }
+    }
+    if (this.accumulatedOutput) {
+      this.callbacks.onTranslation?.(this.accumulatedOutput);
     }
 
     if (content.turnComplete) {
+      this.accumulatedOutput = "";
       this.callbacks.onTurnComplete?.();
     }
   }

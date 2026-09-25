@@ -7,6 +7,8 @@ interface Send {
   send: (payload: unknown) => void;
 }
 
+const DEBUG = process.env.BRIDGE_DEBUG === "1";
+
 function toBuffer(data: WebSocket.RawData): Buffer {
   if (Buffer.isBuffer(data)) return data;
   if (Array.isArray(data)) return Buffer.concat(data);
@@ -19,8 +21,17 @@ export function registerWsHandlers(wss: WebSocketServer, config: BridgeConfig): 
   wss.on("connection", (ws) => {
     let transcriber: Transcriber | null = null;
     let starting = false;
+    const startMs = Date.now();
 
     const send: Send["send"] = (payload) => {
+      if (DEBUG) {
+        const p = payload as { type?: string; phase?: string; text?: string } | null;
+        const text = p?.text ? ` "${p.text.slice(0, 120)}${p.text.length > 120 ? "…" : ""}"` : "";
+        console.log(
+          `[ws-relay][T+${Date.now() - startMs}ms] ->`,
+          `${p?.type ?? "?"}${p?.phase ? `/${p.phase}` : ""}${text}`,
+        );
+      }
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify(payload));
       }

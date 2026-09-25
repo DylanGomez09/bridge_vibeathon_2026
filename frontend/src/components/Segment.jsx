@@ -5,12 +5,17 @@ function formatTime(ms) {
   return `${minutes}:${seconds}`
 }
 
-export default function Segment({ segment, live }) {
+export default function Segment({ segment, live, pending }) {
   return (
     <div className={`segment${live ? " segment-live" : ""}`}>
       <span className="segment-time">{live ? "ahora" : formatTime(segment.ts)}</span>
-      <div className="segment-original">{segment.original}</div>
-      <div className="segment-translation">{segment.translation}</div>
+      <div className="segment-original">{segment.original || (live ? "…" : "")}</div>
+      <div className="segment-translation">
+        {segment.translation}
+        {live && pending && !segment.translation ? (
+          <em className="hint">Esperando traducción…</em>
+        ) : null}
+      </div>
     </div>
   )
 }

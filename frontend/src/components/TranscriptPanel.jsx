@@ -4,6 +4,8 @@ export default function TranscriptPanel({ segments, currentOriginal, currentTran
   const hasLive =
     (currentOriginal?.text ?? "").length > 0 || (currentTranslation ?? "").length > 0
 
+  const pendingTranslation = hasLive && (currentTranslation ?? "").length === 0
+
   const live = {
     ts: null,
     original: currentOriginal?.text ?? "",
@@ -22,8 +24,8 @@ export default function TranscriptPanel({ segments, currentOriginal, currentTran
           <div className="empty-state">
             <span className="big">…</span>
             <p>
-              Iniciá el micrófono o subí un archivo de audio para ver la
-              transcripción y la traducción en vivo.
+              Iniciá el micrófono o subí un archivo de audio o video para ver
+              la transcripción y la traducción en vivo.
             </p>
           </div>
         ) : (
@@ -31,7 +33,7 @@ export default function TranscriptPanel({ segments, currentOriginal, currentTran
             {segments.map((segment) => (
               <Segment key={segment.id} segment={segment} />
             ))}
-            {hasLive ? <Segment segment={live} live /> : null}
+            {hasLive ? <Segment segment={live} live pending={pendingTranslation} /> : null}
           </div>
         )}
       </div>

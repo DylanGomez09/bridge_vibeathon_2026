@@ -112,6 +112,46 @@ body {
   border-color: var(--border);
 }
 
+.btn-srt {
+  background: var(--panel);
+  color: var(--bridge-blue);
+  border-color: var(--bridge-blue);
+}
+
+.progress {
+  position: relative;
+  flex: 1 1 100%;
+  min-width: 0;
+  height: 2.25rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+}
+
+.progress-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: color-mix(in srgb, var(--bridge-blue) 22%, transparent);
+  transition: width 0.15s ease;
+}
+
+.progress-label {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  text-align: center;
+  color: var(--ink);
+  font-size: 0.85rem;
+  font-weight: 600;
+  padding: 0 0.5rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .source-info {
   color: var(--ink-soft);
   font-size: 0.85rem;
@@ -196,6 +236,12 @@ body {
 .segment-live .segment-original,
 .segment-live .segment-translation {
   font-weight: 600;
+}
+
+.hint {
+  color: var(--ink-soft);
+  font-style: italic;
+  font-weight: 400;
 }
 
 .live-chip {

@@ -43,6 +43,11 @@ const BASE_CONFIG: BridgeConfig = {
   staleSessionMs: 60000,
   maxSessions: 4,
   sessionGraceMs: 15000,
+  videoModel: "fake-video-model",
+  videoMaxSeconds: 600,
+  videoMaxBytes: 209715200,
+  videoTimeoutMs: 600000,
+  corsOrigins: ["http://localhost:5173"],
 };
 
 /** Transcriber falso: no toca la red, sólo registra lo que recibió. */
@@ -145,7 +150,7 @@ async function testFanOutDeSuscriptores(): Promise<void> {
   const h = new Harness();
   const a = h.open("1", { label: "A" });
   const muros = [h.client(), h.client(), h.client()];
-  for (const m of muros) h.registry.subscribe(m.ws, a.entry.id);
+  for (const m of muros) h.registry.subscribe(m.ws, m.id, a.entry.id);
 
   check("3 oyentes + owner = 4 clientes", h.registry.meta(a.entry.id)?.clients === 4);
 
@@ -304,7 +309,7 @@ async function testSoloOwnerMandaAudio(): Promise<void> {
   const a = h.open("1", { label: "A" });
   const listener = h.client();
 
-  const sub = h.registry.subscribe(listener.ws, a.entry.id);
+  const sub = h.registry.subscribe(listener.ws, listener.id, a.entry.id);
   check("el suscriptor entra a la sesión", sub.ok);
 
   const result = h.registry.pushAudio(listener.ws, listener.id, Buffer.from("intento"));
@@ -319,7 +324,7 @@ async function testSintonizacionAislada(): Promise<void> {
   const a = h.open("1", { label: "A" });
   const b = h.open("2", { label: "B" });
   const listener = h.client();
-  h.registry.subscribe(listener.ws, b.entry.id);
+  h.registry.subscribe(listener.ws, listener.id, b.entry.id);
 
   a.trans.callbacks.onInput?.("texto-de-A");
   a.trans.callbacks.onTranslation?.("traduccion-de-A");
@@ -355,7 +360,7 @@ async function testBajaQuirurgica(): Promise<void> {
   const a = h.open("1", { label: "A" });
   const b = h.open("2", { label: "B" });
   const listenerB = h.client();
-  h.registry.subscribe(listenerB.ws, b.entry.id);
+  h.registry.subscribe(listenerB.ws, listenerB.id, b.entry.id);
 
   h.registry.close(a.entry.id, "stopped");
 
@@ -479,7 +484,7 @@ async function testGraceVencido(): Promise<void> {
   const h = new Harness({ graceMs: 60 });
   const a = h.open("1", { label: "A" });
   const listener = h.client();
-  h.registry.subscribe(listener.ws, a.entry.id);
+  h.registry.subscribe(listener.ws, listener.id, a.entry.id);
 
   h.registry.removeClient(a.ws, a.id);
   check("durante el grace la sesión sigue viva", h.registry.size === 1);
@@ -504,7 +509,7 @@ async function testStopSoloOwner(): Promise<void> {
   const h = new Harness();
   const a = h.open("1", { label: "A" });
   const listener = h.client();
-  h.registry.subscribe(listener.ws, a.entry.id);
+  h.registry.subscribe(listener.ws, listener.id, a.entry.id);
 
   const denied = h.registry.stop(listener.ws, listener.id);
   check("el oyente no puede cerrar la sesión de otro", !denied.ok, denied.ok ? "permitió" : denied.reason);
@@ -521,8 +526,8 @@ async function testDesconexionDeOyente(): Promise<void> {
   const a = h.open("1", { label: "A" });
   const l1 = h.client();
   const l2 = h.client();
-  h.registry.subscribe(l1.ws, a.entry.id);
-  h.registry.subscribe(l2.ws, a.entry.id);
+  h.registry.subscribe(l1.ws, l1.id, a.entry.id);
+  h.registry.subscribe(l2.ws, l2.id, a.entry.id);
 
   h.registry.removeClient(l1.ws, l1.id);
   check("la sesión sigue viva", h.registry.size === 1);
@@ -553,12 +558,140 @@ async function testSuscripcionATodas(): Promise<void> {
   check("A y C no cerraron su Gemini", owners[0].trans.closed === 0 && owners[2].trans.closed === 0);
 }
 
+async function testMultiplesOwnersSimultaneos(): Promise<void> {
+  section("Varias sesiones abiertas y propias desde la misma pestaña");
+  const h = new Harness();
+  const opened = [
+    h.open("1", { label: "A", sourceLang: "en", targetLang: "es" }),
+    h.open("2", { label: "B", sourceLang: "en", targetLang: "es" }),
+    h.open("3", { label: "C", sourceLang: "pt", targetLang: "en" }),
+    h.open("4", { label: "D", sourceLang: "en", targetLang: "fr" }),
+  ];
+
+  check("hay 4 sesiones vivas", h.registry.size === 4);
+  check("cada una abrió su propia conexión a Gemini", h.transcribers.length === 4);
+  check(
+    "cada una tiene un ownerToken distinto",
+    new Set(opened.map((o) => o.ownerToken)).size === 4,
+  );
+  check(
+    "cada una quedó con su owner",
+    opened.every((o) => h.registry.meta(o.entry.id)?.ownerId === o.id),
+  );
+  check(
+    "los idiomas son por sesión",
+    h.registry.meta(opened[2].entry.id)?.sourceLang === "pt" &&
+      h.registry.meta(opened[2].entry.id)?.targetLang === "en" &&
+      h.registry.meta(opened[3].entry.id)?.targetLang === "fr",
+  );
+  check("C no compartió config con A", opened[2].trans.config.bridgeSourceLang === "pt");
+  check("A no compartió config con D", opened[0].trans.config.bridgeTargetLang === "es");
+
+  for (const [index, owner] of opened.entries()) {
+    check(
+      `${owner.entry.label} puede mandar audio a su propia sesión`,
+      h.registry.pushAudio(owner.ws, owner.id, Buffer.from(`audio-${index}`)).ok,
+    );
+  }
+  for (const [index, owner] of opened.entries()) {
+    check(
+      `${owner.entry.label} recibió sólo su propio audio`,
+      owner.trans.chunks.length === 1 &&
+        owner.trans.chunks[0].toString() === `audio-${index}`,
+    );
+  }
+
+  opened[1].trans.callbacks.onTranslation?.("solo-para-B");
+  for (const owner of [opened[0], opened[2], opened[3]]) {
+    check(
+      `${owner.entry.label} no recibió la traducción de B`,
+      !h.payloads(owner.ws).some((p) => p.text === "solo-para-B"),
+    );
+  }
+  check(
+    "B sí recibió su propia traducción",
+    h.payloads(opened[1].ws).some((p) => p.text === "solo-para-B"),
+  );
+
+  h.registry.stop(opened[1].ws, opened[1].id);
+  check("cerrar B no afecta a las otras 3", h.registry.size === 3);
+  check("A, C y D siguen con ownership", opened
+    .filter((_, i) => i !== 1)
+    .every((o) => h.registry.meta(o.entry.id)?.ownerId === o.id));
+}
+
+async function testOwnerQueSeMudaDeSesion(): Promise<void> {
+  section("El owner que se sintoniza a otra sesión deja la anterior con grace");
+  const h = new Harness({ graceMs: 40 });
+  const a = h.open("1", { label: "A" });
+  const b = h.open("2", { label: "B" });
+
+  // Un WS sólo puede estar suscrito a una sesión: el socket del owner de A se
+  // re-apunta a B con subscribe. A queda sin nadie capaz de mandarle audio, así que
+  // tiene que entrar en grace y cerrarse sola en vez de quedar huérfana.
+  h.registry.subscribe(a.ws, a.id, b.entry.id);
+  check("A queda huérfana", h.registry.meta(a.entry.id)?.ownerId === null);
+  check("A tiene graceUntil para la UI", h.registry.meta(a.entry.id)?.graceUntil !== null);
+  check("A no se cierra en el acto", h.registry.size === 2);
+  check("A ya no puede recibir audio", !h.registry.pushAudio(a.ws, a.id, Buffer.from("x")).ok);
+
+  await sleep(120);
+  check("vencido el grace A se cierra sola", h.registry.size === 1);
+  check("A cerró su conexión a Gemini", a.trans.closed === 1);
+  check("B quedó intacta", b.trans.closed === 0);
+}
+
+async function testStartRepetidoEnElMismoSocket(): Promise<void> {
+  section("Un start repetido en el mismo socket no deja la sesión anterior huérfana");
+  const h = new Harness({ graceMs: 40 });
+  const owner = h.client();
+
+  const alta = (label: string) => {
+    const created = h.registry.create({
+      owner: owner.ws,
+      ownerClientId: owner.id,
+      label,
+    });
+    if (!created.ok) throw new Error(`create falló: ${created.reason}`);
+    const connected = h.registry.connect(created.entry.id);
+    if (!connected.ok) throw new Error(`connect falló: ${connected.reason}`);
+    return created.entry;
+  };
+
+  // create() re-apunta el ws a la sesión nueva, igual que hace subscribe(). Si no saca
+  // al cliente de la anterior, esa sesión queda con un ownerClientId que ya no la
+  // apunta, nunca entra en grace y se queda ocupando un cupo de maxSessions para
+  // siempre: es una sesión que aparece sin que nadie la haya creado.
+  const a = alta("A");
+  const transA = h.transcribers[h.transcribers.length - 1];
+  const b = alta("B");
+  const transB = h.transcribers[h.transcribers.length - 1];
+
+  check("quedan 2 sesiones", h.registry.size === 2);
+  check("A queda huérfana", h.registry.meta(a.id)?.ownerId === null);
+  check("A tiene graceUntil para la UI", h.registry.meta(a.id)?.graceUntil !== null);
+  check("A no se cierra en el acto", h.registry.size === 2);
+  check("el socket quedó apuntado a B", h.registry.meta(b.id)?.ownerId === owner.id);
+  check(
+    "el audio del socket va al pipeline de B y no al de A",
+    h.registry.pushAudio(owner.ws, owner.id, Buffer.from("y")).ok &&
+      transB.chunks[0]?.toString() === "y" &&
+      transA.chunks.length === 0,
+  );
+
+  await sleep(120);
+  check("vencido el grace A se cierra sola", h.registry.size === 1);
+  check("A cerró su conexión a Gemini", transA.closed === 1);
+  check("B quedó intacta", transB.closed === 0);
+}
+
 async function main(): Promise<void> {
   console.log(`${DIM}[bridge] test-sessions-registry: ciclo de vida multi-sesión (offline)${RESET}`);
 
   await testAltaAislamiento();
   await testFanOutDeSuscriptores();
   await testConnectEsIdempotente();
+  await testMultiplesOwnersSimultaneos();
   await testAudioNoSeMezcla();
   await testSoloOwnerMandaAudio();
   await testSintonizacionAislada();
@@ -572,6 +705,8 @@ async function main(): Promise<void> {
   await testStopSoloOwner();
   await testDesconexionDeOyente();
   await testSuscripcionATodas();
+  await testOwnerQueSeMudaDeSesion();
+  await testStartRepetidoEnElMismoSocket();
 
   console.log("");
   if (failed === 0) {

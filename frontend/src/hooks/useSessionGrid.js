@@ -2,23 +2,24 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { BridgeSocket } from "../lib/ws/bridge-socket.js"
 import { debug } from "../lib/debug.js"
 
-// Tope de segmentos guardados por sesión: la tarjeta muestra los últimos y el muro
+// Tope de segmentos guardados por sesión: la tarjeta muestra los últimos y el panel
 // no crece sin límite durante una charla larga.
 const MAX_FEED_SEGMENTS = 40
 
 const emptyFeed = () => ({ original: "", translation: "", segments: [], ended: false })
 
 /**
- * Muro de sesiones: sigue TODAS las sesiones activas en paralelo, en sólo lectura.
+ * Panel "En vivo": sigue TODAS las sesiones activas en paralelo, en sólo lectura.
  *
  * Diseño: un socket dedicado por sesión. El protocolo forbids que un WS esté
  * suscripto a dos sesiones a la vez, así que "ver varias a la vez" significa "un
  * socket por sesión". No hace falta tocar el backend ni el aislamiento.
  *
  * Las tarjetas nunca mandan audio: el backend ya rechaza el audio de quien no es
- * owner, así que aunque el muro tuviera un bug no podría corromper una sesión.
+ * owner, así que aunque el panel tuviera un bug no podría corromper una sesión. Por
+ * lo mismo no puede cerrarlas: no es owner de ninguna.
  *
- * `enabled` evita suscribirse mientras el muro no está a la vista: mantener N
+ * `enabled` evita suscribirse mientras el panel no está a la vista: mantener N
  * sockets abiertos todo el tiempo inflaría el contador de oyentes de cada sesión.
  */
 export function useSessionGrid(enabled) {
@@ -109,7 +110,7 @@ export function useSessionGrid(enabled) {
   }, [])
 
   // Reconciliación: abre sockets para las sesiones nuevas y los cierra para las que
-  // desaparecieron. Sólo con el muro visible.
+  // desaparecieron. Sólo con el panel En vivo a la vista.
   useEffect(() => {
     if (!enabled) {
       for (const socket of socketsRef.current.values()) socket.close()

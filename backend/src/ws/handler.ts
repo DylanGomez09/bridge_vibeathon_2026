@@ -89,7 +89,11 @@ export function registerWsHandlers(wss: WebSocketServer, config: BridgeConfig): 
           // El audio se rutea exclusivamente a la sesión de este cliente. Si no es el
           // owner, el registro lo rechaza: así el audio de A nunca llega al pipeline de B.
           const result = registry.pushAudio(ws, clientId, toBuffer(data));
-          if (!result.ok && !audioErrorNotified) {
+          if (result.ok) {
+            // Un rechazo transitorio no puede dejar el error pegado para siempre: si
+            // el audio vuelve a pasar, el próximo fallo vuelve a avisar.
+            audioErrorNotified = false;
+          } else if (!audioErrorNotified) {
             audioErrorNotified = true;
             fail(result.reason);
           }
@@ -144,7 +148,7 @@ export function registerWsHandlers(wss: WebSocketServer, config: BridgeConfig): 
               fail("Falta el sessionId para suscribirse");
               return;
             }
-            const result = registry.subscribe(ws, message.sessionId);
+            const result = registry.subscribe(ws, clientId, message.sessionId);
             if (!result.ok) {
               fail(result.reason);
               return;

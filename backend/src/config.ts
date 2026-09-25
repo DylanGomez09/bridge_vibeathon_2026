@@ -2,6 +2,9 @@ import "dotenv/config";
 
 export type ResponseModality = "text" | "audio";
 
+export const VIDEO_TARGET_LANGS = ["es", "en"] as const;
+export type VideoTargetLang = (typeof VIDEO_TARGET_LANGS)[number];
+
 export interface BridgeConfig {
   geminiApiKey: string;
   geminiLiveModel: string;
@@ -16,6 +19,11 @@ export interface BridgeConfig {
   staleSessionMs: number;
   maxSessions: number;
   sessionGraceMs: number;
+  videoModel: string;
+  videoMaxSeconds: number;
+  videoMaxBytes: number;
+  videoTimeoutMs: number;
+  corsOrigins: string[];
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
@@ -34,5 +42,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
     staleSessionMs: Math.max(0, Number(env.BRIDGE_STALE_SESSION_MS ?? 60000)),
     maxSessions: Math.max(1, Number(env.BRIDGE_MAX_SESSIONS ?? 4)),
     sessionGraceMs: Math.max(0, Number(env.BRIDGE_SESSION_GRACE_MS ?? 15000)),
+    videoModel: env.BRIDGE_VIDEO_MODEL ?? "gemini-3.5-flash-lite",
+    videoMaxSeconds: Math.max(1, Number(env.BRIDGE_VIDEO_MAX_SECONDS ?? 600)),
+    videoMaxBytes: Math.max(1, Number(env.BRIDGE_VIDEO_MAX_BYTES ?? 209715200)),
+    videoTimeoutMs: Math.max(1000, Number(env.BRIDGE_VIDEO_TIMEOUT_MS ?? 600000)),
+    corsOrigins: String(
+      env.BRIDGE_CORS_ORIGINS ?? "http://localhost:5173,http://localhost:5174",
+    )
+      .split(",")
+      .map((origin) => origin.trim())
+      .filter(Boolean),
   };
 }

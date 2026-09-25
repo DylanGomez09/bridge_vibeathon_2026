@@ -215,9 +215,30 @@ export class SessionRegistry {
     const transcriber = this.#createTranscriber(sessionConfig, this.#callbacksFor(entry));
     entry.transcriber = transcriber;
 
+    // Un socket sólo puede estar apuntado a una sesión (#subscribed es ws -> sessionId).
+    // Si este ws ya estaba en otra hay que sacarlo de ella y dispararle su grace: si
+    // no, la sesión vieja queda con un ownerClientId que ya no la apunta, nunca entra
+    // en grace y se queda ocupando uno de los cupos de maxSessions para siempre.
+    // Es el mismo tratamiento que le da subscribe() más abajo.
+    let orphanedEntry: SessionEntry | undefined;
+    const previous = this.#subscribed.get(owner);
+    if (previous && previous !== id) {
+      this.#subscribed.delete(owner);
+      const old = this.#sessions.get(previous);
+      if (old) {
+        old.clients.delete(owner);
+        if (old.ownerClientId === ownerClientId) orphanedEntry = old;
+      }
+    }
+
     this.#sessions.set(id, entry);
     this.#subscribed.set(owner, id);
-    this.#onChange();
+
+    if (orphanedEntry && !orphanedEntry.closing) {
+      this.#startGrace(orphanedEntry);
+    } else {
+      this.#onChange();
+    }
 
     return { ok: true, entry, ownerToken };
   }
@@ -294,21 +315,33 @@ export class SessionRegistry {
   }
 
   /** Tune-in a una sesión existente. Solo escucha: no puede enviar audio. */
-  subscribe(ws: WebSocket, sessionId: string): ActionResult {
+  subscribe(ws: WebSocket, clientId: string, sessionId: string): ActionResult {
     const entry = this.#sessions.get(sessionId);
     if (!entry || entry.closing) {
       return { ok: false, reason: "La sesión ya no está activa" };
     }
+    let orphanedEntry: SessionEntry | undefined;
     const previous = this.#subscribed.get(ws);
     if (previous && previous !== sessionId) {
       this.#subscribed.delete(ws);
       const old = this.#sessions.get(previous);
-      old?.clients.delete(ws);
+      if (old) {
+        old.clients.delete(ws);
+        if (old.ownerClientId === clientId) orphanedEntry = old;
+      }
     }
     this.#subscribed.set(ws, sessionId);
     entry.clients.add(ws);
     entry.lastActivityAt = this.#now();
-    this.#onChange();
+
+    // El socket del owner se mudó de sesión, así que la que dejaba queda sin nadie
+    // capaz de mandarle audio. Se le dispara su grace: si un refresh la reclama,
+    // se recupera; si no, se cierra sola en vez de quedar huérfana ocupando cupo.
+    if (orphanedEntry && !orphanedEntry.closing) {
+      this.#startGrace(orphanedEntry);
+    } else {
+      this.#onChange();
+    }
     return { ok: true };
   }
 
@@ -354,6 +387,11 @@ export class SessionRegistry {
     const entry = this.#sessions.get(id);
     if (!entry || entry.closing) return { ok: false, reason: "La sesión ya no está activa" };
     if (entry.ownerClientId !== clientId) {
+      if (DEBUG) {
+        console.log(
+          `[audio][denegado] sesion=${id.slice(0, 8)} ws=${clientId.slice(0, 8)} owner=${String(entry.ownerClientId).slice(0, 8)} clientes=${entry.clients.size}`,
+        );
+      }
       return { ok: false, reason: "Sólo el owner de la sesión puede enviar audio" };
     }
     entry.lastActivityAt = this.#now();

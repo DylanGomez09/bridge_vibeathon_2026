@@ -28,6 +28,9 @@ function Feed({ feed }) {
   )
 }
 
+// Panel "En vivo": sólo lectura. Abre un socket read-only por sesión y nunca toma
+// ownership, así que no puede administrar nada acá: para cortar o crear se va a
+// Sesiones. Por eso no tiene botón de eliminar.
 export default function SessionGrid({ sessions, feeds, connState, onOpen }) {
   if (connState === "offline") {
     return (
@@ -41,8 +44,8 @@ export default function SessionGrid({ sessions, feeds, connState, onOpen }) {
     return (
       <div className="content">
         <div className="session-grid-empty card">
-          No hay sesiones activas. Abrí el micrófono o subí un archivo en otra pestaña y el muro
-          la mostraría acá, en sólo lectura.
+          No hay sesiones activas. Abrí el micrófono o subí un archivo en otra pestaña y acá
+          aparecería su transcripción en vivo.
         </div>
       </div>
     )
@@ -50,7 +53,7 @@ export default function SessionGrid({ sessions, feeds, connState, onOpen }) {
 
   return (
     <div className="content">
-      <div className="session-grid">
+      <div className="session-grid" data-tour="muro-grid">
         {sessions.map((session) => {
           const feed = feeds[session.id]
           const status = sessionStatus(session)

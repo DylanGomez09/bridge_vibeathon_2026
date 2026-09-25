@@ -1,5 +1,7 @@
 const LANGS = { en: "EN", es: "ES", pt: "PT", fr: "FR", de: "DE" }
 
+export { LANGS }
+
 export function langName(code) {
   return LANGS[code] ?? String(code).toUpperCase()
 }
@@ -12,7 +14,7 @@ export function shortId(id) {
   return id ? id.slice(0, 8) : "—"
 }
 
-/** Estado visual de una sesión, compartido entre el listado y el muro. */
+/** Estado visual de una sesión, compartido entre el listado y el panel En vivo. */
 export function sessionStatus(session) {
   if (session.orphaned) {
     const left = session.graceUntil

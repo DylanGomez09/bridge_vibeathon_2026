@@ -13,6 +13,7 @@
     "test:connection": "tsx test-connection.ts",
     "test:pipeline": "tsx test-pipeline.ts",
     "test:sessions": "tsx test-sessions-registry.ts",
+    "test:video": "tsx test-video-subtitles.ts",
     "test:multisession": "tsx test-multisession.ts"
   },
   "dependencies": {

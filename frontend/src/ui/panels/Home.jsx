@@ -11,7 +11,7 @@ const PHASE = {
   error: { text: "Error en la sesión", dot: "dot-idle" },
 }
 
-export default function Home({ phase, activeSessions, onNavigate }) {
+export default function Home({ phase, activeSessions, onNavigate, onStartTour }) {
   const state = PHASE[phase] ?? PHASE.idle
 
   return (
@@ -40,12 +40,15 @@ export default function Home({ phase, activeSessions, onNavigate }) {
           <h3>
             <MicIcon size={18} /> Accesos rápidos
           </h3>
-          <div className="hero-ctas">
+          <div className="hero-ctas" data-tour="home-cta">
             <button type="button" className="btn btn-brand btn-sm" onClick={() => onNavigate("traduccion")}>
               <TranslateIcon size={16} /> Ir a Traducción
             </button>
             <button type="button" className="btn btn-surface btn-sm" onClick={() => onNavigate("microfono")}>
               Probar micrófono <ArrowRightIcon size={14} />
+            </button>
+            <button type="button" className="btn btn-surface btn-sm" onClick={() => onStartTour?.()}>
+              Recorrer la sala <ArrowRightIcon size={14} />
             </button>
           </div>
         </article>

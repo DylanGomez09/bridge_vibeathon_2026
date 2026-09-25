@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react"
 import { createMicProbe } from "../../lib/audio/capture-mic.js"
+import { friendlyMessage } from "../../lib/errors.js"
 import { MicIcon } from "../icons.jsx"
 
 const LISTENING_RMS = 0.02
@@ -113,7 +114,7 @@ export default function Microphone() {
       probeRef.current = probe
       setActive(true)
     } catch (cause) {
-      setError(cause?.message ?? "No se pudo acceder al micrófono")
+      setError(friendlyMessage(cause, "No se pudo acceder al micrófono"))
     }
   }
 

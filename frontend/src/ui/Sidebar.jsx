@@ -11,7 +11,7 @@ export default function Sidebar({ items, active, onSelect, collapsed, onToggle, 
         <img className="brand-mark-toggle" src="/brand/favicon.svg" alt="" />
       </div>
 
-      <nav className="nav" aria-label="Paneles">
+      <nav className="nav" aria-label="Paneles" data-tour="nav">
         {items.map((item) => (
           <button
             key={item.id}

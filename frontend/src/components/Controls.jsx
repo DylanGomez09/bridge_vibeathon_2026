@@ -36,16 +36,16 @@ export default function Controls({
 
   return (
     <div className="controls">
-      <button className="btn btn-primary" onClick={onStartMic} disabled={busy}>
+      <button className="btn btn-primary" onClick={onStartMic} disabled={busy} data-tour="mic">
         Iniciar micrófono
       </button>
-      <button className="btn btn-file" onClick={() => fileRef.current?.click()} disabled={busy}>
+      <button className="btn btn-file" onClick={() => fileRef.current?.click()} disabled={busy} data-tour="file">
         Subir archivo
       </button>
       <input
         ref={fileRef}
         type="file"
-        accept="audio/*,.mp3,.m4a,.wav,.ogg,.webm, video/*,.mp4,.m4v,.mov"
+        accept="audio/*,.mp3,.m4a,.wav,.ogg,.webm,.aac,.flac"
         style={{ display: "none" }}
         onChange={handleFile}
       />

@@ -1,0 +1,76 @@
+export const TOUR_KEY = "bridge:tour-done"
+
+export const TOUR_STEPS = [
+  {
+    id: "intro",
+    title: "Bienvenido a Puente",
+    body: "Puente traduce y subtitula en vivo. Te muestro en 9 pasos cómo se usa, y te llevo a cada pantalla para que la veas funcionando. Podés saltar el recorrido cuando quieras.",
+  },
+  {
+    id: "nav",
+    target: '[data-tour="nav"]',
+    title: "Todo pasa por acá",
+    body: "En esta barra están las secciones de la sala. La que vas a usar casi siempre es Traducción: ahí están el micrófono, la carga de archivos y los subtítulos de video.",
+  },
+  {
+    id: "home-cta",
+    panel: "inicio",
+    target: '[data-tour="home-cta"]',
+    title: "Tu punto de partida",
+    body: "Esta es la pantalla de Inicio. El botón Ir a Traducción te deja en el panel principal en un solo clic, sin buscar nada.",
+  },
+  {
+    id: "mic",
+    panel: "traduccion",
+    mode: "audio",
+    target: '[data-tour="mic"]',
+    title: "1. Hablá y te traduce al instante",
+    body: "Tocá Iniciar micrófono y concedé el permiso cuando el navegador lo pida. Después, habla normal: vas a ver aparecer la frase original en inglés y su traducción al español al mismo tiempo.",
+  },
+  {
+    id: "file",
+    panel: "traduccion",
+    mode: "audio",
+    target: '[data-tour="file"]',
+    title: "2. O subí una grabación",
+    body: "Si ya tenés un audio grabado, usá Subir archivo. Se transcribe y traduce completo, y te muestra el avance en porcentaje para que sepas cuánto falta.",
+  },
+  {
+    id: "columns",
+    panel: "traduccion",
+    mode: "audio",
+    target: '[data-tour="transcript"]',
+    title: "Original y traducción, lado a lado",
+    body: "Cada frase aparece en dos columnas: lo que se dijo a la izquierda y la traducción a la derecha. Cuando hay varias personas hablando, cada sesión mantiene su propia lista.",
+  },
+  {
+    id: "video-tab",
+    panel: "traduccion",
+    mode: "audio",
+    target: '[data-tour="mode-tabs"]',
+    title: "3. También funciona con video",
+    body: "En la pestaña Video, Gemini mira y escucha el clip y escribe los subtítulos por su cuenta. No hace falta elegir una pista de audio: entiende la voz directamente.",
+  },
+  {
+    id: "video-generate",
+    panel: "traduccion",
+    mode: "video",
+    target: '[data-tour="video-controls"]',
+    title: "Elegí el video y el idioma",
+    body: "Tocá Elegir video, indicá a qué idioma querés los subtítulos y presioná Generar subtítulos. Puede tardar unos minutos porque el modelo analiza el video completo. Cuando termina, descargás el archivo .srt.",
+  },
+  {
+    id: "sessions",
+    panel: "sesiones",
+    target: '[data-tour="sessions-create"]',
+    title: "4. Varias sesiones al mismo tiempo",
+    body: "Acá creás y administrás las sesiones. Cada una transcribe y traduce por separado, sin mezclarse, así que varias personas pueden hablar a la vez. El máximo es de 4 en simultáneo. Sólo las tuyas se pueden eliminar: si abrís una sesión en otra pestaña, acá aparece como oyente y sólo podés mirarla.",
+  },
+  {
+    id: "muro",
+    panel: "muro",
+    target: '[data-tour="muro-grid"], .session-grid-empty',
+    title: "5. En vivo: todo junto",
+    body: "Acá ves cada sesión en una tarjeta con su transcripción en vivo, todas a la vez. Tocá Ver en grande en cualquiera para entrar a mirar qué se está diciendo. Es sólo lectura: para cortar una sesión volvé a Sesiones.",
+  },
+]

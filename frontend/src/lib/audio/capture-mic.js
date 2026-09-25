@@ -6,15 +6,29 @@ let probeStream = null
 let probeRaf = 0
 let probeAnalyser = null
 
+const MIC_CONSTRAINTS = {
+  audio: {
+    channelCount: 1,
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true,
+  },
+}
+
+// getUserMedia sólo existe en contexto seguro. Sobre http:// en una IP de la LAN
+// navigator.mediaDevices viene undefined y el TypeError crudo no le dice nada al
+// usuario, así que se corta acá con un motivo que friendlyMessage sabe traducir.
+const requireMic = () => {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    throw new Error(
+      window.isSecureContext ? "mic-unsupported" : "mic-insecure-context",
+    )
+  }
+  return navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS)
+}
+
 export async function createMicProbe(onLevel) {
-  probeStream = await navigator.mediaDevices.getUserMedia({
-    audio: {
-      channelCount: 1,
-      echoCancellation: true,
-      noiseSuppression: true,
-      autoGainControl: true,
-    },
-  })
+  probeStream = await requireMic()
 
   probeCtx = new AudioContext()
   const source = probeCtx.createMediaStreamSource(probeStream)
@@ -51,14 +65,11 @@ export async function createMicProbe(onLevel) {
 }
 
 export async function startMicCapture(onChunk) {
-  stream = await navigator.mediaDevices.getUserMedia({
-    audio: {
-      channelCount: 1,
-      echoCancellation: true,
-      noiseSuppression: true,
-      autoGainControl: true,
-    },
-  })
+  // Si quedó una captura anterior viva, se cierra primero. stream y context son
+  // singletons de módulo: sin esto el worklet viejo sigue procesando y mandando audio
+  // en paralelo con el nuevo, o sea el doble de audio hacia la misma sesión.
+  if (stream) stopMicCapture()
+  stream = await requireMic()
 
   context = new AudioContext()
   await context.audioWorklet.addModule("/worklets/downsample.js")

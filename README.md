@@ -1,16 +1,91 @@
 # BRIDGE
 
-Transcripción y traducción en tiempo real **(EN → ES)** de conferencias usando la **Gemini Live API** (modelo de audio, WebSocket bidireccional). Navegador → backend (relay WebSocket) → sesión `live` de Gemini; el backend devuelve la transcripción original y la traducción al español, y la UI las renderiza en un panel estilo "suptítulos".
+[![Node](https://img.shields.io/badge/Node-%3E%3D20-5FA04E?style=flat-square)](https://nodejs.org)
+[![pnpm](https://img.shields.io/badge/pnpm-10.15.1-F69220?style=flat-square)](https://pnpm.io)
+[![React](https://img.shields.io/badge/React-19-61DAFB?style=flat-square)](https://react.dev)
+[![Vite](https://img.shields.io/badge/Vite-8-646CFF?style=flat-square)](https://vite.dev)
+[![TypeScript](https://img.shields.io/badge/TypeScript-7-3178C6?style=flat-square)](https://www.typescriptlang.org)
+[![License](https://img.shields.io/badge/license-MIT-yellow?style=flat-square)](#licencia)
+
+Transcripción y traducción en tiempo real **(EN → ES)** de conferencias usando la **Gemini Live API** (modelo de audio, WebSocket bidireccional). El navegador captura el audio, el backend lo reenvía a una sesión `live` de Gemini y devuelve la transcripción original y la traducción al español, que la UI renderiza en un panel estilo "subtítulos".
+
+---
+
+## Índice
+
+- [Arquitectura](#arquitectura)
+- [Cómo correr](#cómo-correr)
+- [Audios de prueba](#audios-de-prueba)
+- [Demo del jurado](#demo-del-jurado-protocolo)
+- [Rendimiento medido](#rendimiento-medido-run-real-clip-de-40-s)
+- [Decisiones de diseño](#decisiones-de-diseño)
+- [Configuración](#configuración-backendenv)
+- [Estructura del repo](#repo)
+- [Licencia](#licencia)
+
+---
+
+## Arquitectura
+
+```mermaid
+flowchart LR
+  NAV["Navegador<br/>Vite · React<br/>:5173"]
+  REL["Backend relay<br/>Express + ws<br/>:3001"]
+  GEM["Gemini Live API<br/>flash-live"]
+  SRT["Subtítulos .srt"]
+
+  NAV -->|"1 · audio PCM 16 kHz"| REL
+  REL -->|"2 · realtime input"| GEM
+  GEM -->|"3 · original + traducción"| REL
+  REL -->|"4 · original + traducción"| NAV
+  NAV -->|"5 · descargar"| SRT
+```
+
+El backend es un **relay**: no transcribe ni traduce, solo reenvía audio a Gemini y devuelve el texto. Por eso la `GEMINI_API_KEY` nunca llega al navegador.
+
+### Flujo de un archivo (turn-splitting)
+
+```mermaid
+sequenceDiagram
+  participant U as Navegador
+  participant R as Relay
+  participant G as Gemini Live
+  U->>R: start
+  R->>G: connect + systemInstruction
+  G-->>R: setupComplete
+  R-->>U: started + ready
+  loop cada turno de 10 s (100 chunks a 2x)
+    U->>R: 100 chunks binarios PCM
+    R->>G: sendRealtimeInput
+    U->>R: endTurn (audioStreamEnd)
+    G-->>R: outputTranscription
+    R-->>U: original + translation
+    R-->>U: segment
+  end
+```
+
+> [!IMPORTANT]
+> El `segment` es la unidad de sincronización: el navegador **espera** a recibirlo antes de enviar el turno siguiente. Saltarse esa espera ("overlap") es inestable con modality `audio`.
+
+---
 
 ## Cómo correr
 
+**Requisitos**: Node ≥ 20 y pnpm 10.15.1 (probado en Node 22.19.0).
+
 ```bash
 pnpm install
-pnpm dev          # backend (tsx watch) :3001 + frontend (vite) :5173
+cp backend/.env.example backend/.env    # luego pegá tu GEMINI_API_KEY
+pnpm dev                                # backend :3001 + frontend :5173
 ```
 
-- **Backend**: `backend/.env` con `GEMINI_API_KEY=...` (ver "Configuración").
-- **Frontend**: `http://localhost:5173`. Debug por consola habilitado con `?debug=1`.
+- **Backend**: `backend/.env` con `GEMINI_API_KEY=...` (ver [Configuración](#configuración-backendenv)).
+- **Frontend**: `http://localhost:5173`.
+
+> [!TIP]
+> Para debuggear: `BRIDGE_DEBUG=1 pnpm dev` en la terminal del backend (logs `[tscriber-verbose]` / `[ws-relay]`) y `http://localhost:5173/?debug=1` en el navegador.
+
+---
 
 ## Audios de prueba
 
@@ -38,62 +113,90 @@ pnpm test:connection backend/assets/short-talk.wav  # clip de 10 s
 pnpm test:pipeline backend/assets/short-demo.wav    # clip de 40 s
 ```
 
-**Ojo**: los scripts de consola (`backend/src/audio/load-pcm.ts`) aceptan **solo `.pcm` y `.wav`**. El navegador acepta mucho más (`.mp3`, `.m4a`, `.ogg`, `.webm` y video `.mp4`, `.m4v`, `.mov`).
+> [!NOTE]
+> Los scripts de consola (`backend/src/audio/load-pcm.ts`) aceptan **solo `.pcm` y `.wav`**. El navegador acepta mucho más (`.mp3`, `.m4a`, `.ogg`, `.webm` y video `.mp4`, `.m4v`, `.mov`).
+
+### Scripts disponibles
+
+| Comando | Qué hace |
+|---|---|
+| `pnpm dev` | Backend (`tsx watch`) + frontend (`vite`) en paralelo |
+| `pnpm build` | Compila backend (`tsc`) y frontend (`vite build`) |
+| `pnpm --filter @bridge/frontend lint` | Lint del frontend (`oxlint`) |
+| `pnpm test:connection [archivo]` | Smoke test contra la Gemini Live API |
+| `pnpm --filter @bridge/backend test:pipeline [archivo]` | Prueba del pipeline de audio |
+| `pnpm --filter @bridge/frontend preview` | Sirve el build de producción |
+
+---
 
 ## Demo del jurado (protocolo)
 
-1. Levantar backend con logs de diagnóstico: `BRIDGE_DEBUG=1 pnpm dev` (filtra `[tscriber-verbose]`/`[ws-relay]` en la terminal del backend).
+1. Levantar el backend con logs de diagnóstico: `BRIDGE_DEBUG=1 pnpm dev`.
 2. Abrir `http://localhost:5173/?debug=1`.
-3. Subir `backend/assets/short-demo.wav` (**40s**, 16 kHz / mono / 16-bit).
-4. Esperar y narrar: primer texto ~6-8s, un segmento completo cada ~18s, 4 segmentos en ~70s de reloj.
+3. Subir `backend/assets/short-demo.wav` (**40 s**, 16 kHz / mono / 16-bit).
+4. Esperar y narrar: primer texto ~6-8 s, un segmento completo cada ~18 s, 4 segmentos en ~70 s de reloj.
 
 Lo que el jurado ve en pantalla: el panel muestra primero la transcripción original en inglés que baja mientras el audio se "transmite", y debajo la traducción en español que se completa por segmentos.
 
-## Rendimiento medido (run real, clip de 40s)
+---
+
+## Rendimiento medido (run real, clip de 40 s)
 
 | Eslabón | Momento |
 |---|---|
-| Conexión WS + `start` | 0.0s |
-| Gemini listo (`status/ready`, T3) | 1.4s |
-| Primer chunk de audio (T1) | 1.9s |
-| Subida turno 1 completa (100 chunks @ 2×) | 6.9s |
-| Primer `original` (EN) en panel | 9.5s (T5−T1 = 7.6s) |
-| Primera `translation` (ES) en panel | 10.0s (T5−T1 = 8.1s) |
-| Segmento 1 | 16.9s (latencia de turno 10.0s) |
-| Segmento 2 | 35.1s (13.2s) |
-| Segmento 3 | 51.8s (11.7s) |
-| Segmento 4 (final) | 69.9s (13.2s) |
+| Conexión WS + `start` | 0.0 s |
+| Gemini listo (`status/ready`, T3) | 1.4 s |
+| Primer chunk de audio (T1) | 1.9 s |
+| Subida turno 1 completa (100 chunks @ 2×) | 6.9 s |
+| Primer `original` (EN) en panel | 9.5 s (T5−T1 = 7.6 s) |
+| Primera `translation` (ES) en panel | 10.0 s (T5−T1 = 8.1 s) |
+| Segmento 1 | 16.9 s (latencia de turno 10.0 s) |
+| Segmento 2 | 35.1 s (13.2 s) |
+| Segmento 3 | 51.8 s (11.7 s) |
+| Segmento 4 (final) | 69.9 s (13.2 s) |
 
-Rangos observados en varios runs (`short-demo.wav` 40s y `short-talk.wav` 10s):
+Rangos observados en varios runs (`short-demo.wav` 40 s y `short-talk.wav` 10 s):
 
-- **Primer texto en pantalla**: 5.4–8.1s después del primer chunk (varía por sesión).
-- **Cadencia de segmentos**: ~16–22s (un turno de 10s de audio).
-- **Latencia de finalización de turno**: ~11–13s (modelo "habla" la traducción; `turnComplete` llega al terminar).
-- **Wall-clock vs duración del audio**: ~1.75–1.9× (40s → ~70s; 60s → ~114s).
+- **Primer texto en pantalla**: 5.4–8.1 s después del primer chunk (varía por sesión).
+- **Cadencia de segmentos**: ~16–22 s (un turno de 10 s de audio).
+- **Latencia de finalización de turno**: ~11–13 s (el modelo "habla" la traducción; `turnComplete` llega al terminar).
+- **Wall-clock vs duración del audio**: ~1.75–1.9× (40 s → ~70 s; 60 s → ~114 s).
 
-Límite honesto: la latencia por turno está dominada por la finalización de turno de **Gemini con modality `audio`**, no por la subida de audio. Bien para 1 sesión de demo en vivo; tiempo real sostenido (o 2+ sesiones compitiendo por el mismo rate-limit) queda al límite.
+> [!WARNING]
+> **Límite honesto**: la latencia por turno está dominada por la finalización de turno de Gemini con modality `audio`, no por la subida de audio. Bien para 1 sesión de demo en vivo; tiempo real sostenido (o 2+ sesiones compitiendo por el mismo rate-limit) queda al límite.
 
-## Arquitectura y decisiones
+---
+
+## Decisiones de diseño
 
 - **Modality `audio` obligatorio**: el modelo rechaza la modalidad `TEXT` (`1007 The requested combination of response modalities (TEXT) is not supported`). La traducción se recibe como `outputTranscription` de la respuesta hablada; `turnComplete` llega solo cuando el modelo termina de hablar.
-- **Sin interims**: la API **no emite** `interimInputTranscription` durante el streaming — el texto (original y traducción) solo baja tras `audioStreamEnd` de cada turno. Por eso el diseño es **turn-splitting**: se envían turnos de 10s de audio a **2×** (100 chunks de 100ms, 50ms/chunk), se hace `endTurn` y se espera el `segment` antes de seguir (`TURN_CHUNKS = 100`, `TURN_WAIT_MS = 20000`). Intentar "overlap" (seguir subiendo sin esperar) es inestable con modality `audio`.
+- **Sin interims**: la API **no emite** `interimInputTranscription` durante el streaming — el texto (original y traducción) solo baja tras `audioStreamEnd` de cada turno. Por eso el diseño es **turn-splitting** (ver el diagrama de secuencia): se envían turnos de 10 s de audio a **2×** (100 chunks de 100 ms, 50 ms/chunk), se hace `endTurn` y se espera el `segment` antes de seguir (`TURN_CHUNKS = 100`, `TURN_WAIT_MS = 20000`).
 - **`accumulatedOutput` se resetea en cada `turnComplete`**: cada segmento es autocontenido; sin esto el texto del turno anterior contamina la traducción siguiente (`backend/src/gemini/transcriber.ts`).
+- **Reconexión resiliente**: el backend reintenta el bind del puerto con backoff si el proceso anterior todavía lo ocupa (típico de `tsx watch`), y libera el puerto en `SIGINT`/`SIGTERM`. El frontend, si el ack de arranque se vence, descarta el socket y reintenta una vez.
+
+---
 
 ## Configuración (backend/.env)
 
 | Variable | Default | Descripción |
 |---|---|---|
-| `GEMINI_API_KEY` | — | Clave de Gemini |
+| `GEMINI_API_KEY` | — | Clave de [Google AI Studio](https://aistudio.google.com/apikey) |
 | `GEMINI_LIVE_MODEL` | `gemini-3.1-flash-live-preview` | Modelo Live |
 | `GEMINI_LIVE_VOICE` | `Aoede` | Voz de la respuesta |
 | `PORT` | `3001` | Puerto del backend |
 | `BRIDGE_RESPONSE_MODALITY` | `audio` | `audio` o `text` (solo `audio` funciona) |
 | `BRIDGE_SOURCE_LANG` | `en` | Idioma fuente |
 | `BRIDGE_TARGET_LANG` | `es` | Idioma de traducción |
+| `BRIDGE_RECONNECT_MAX_ATTEMPTS` | `3` | Reintentos de reconexión con Gemini |
+| `BRIDGE_RECONNECT_BASE_DELAY_MS` | `1000` | Delay base del backoff exponencial |
+| `BRIDGE_READY_TIMEOUT_MS` | `15000` | Timeout esperando `setupComplete` |
+| `BRIDGE_STALE_SESSION_MS` | `60000` | Watchdog de sesión colgada (`0` desactiva) |
+
+---
 
 ## Repo
 
-```
+```text
 backend/
   src/gemini/transcriber.ts   # sesión Live de Gemini, merge + reset de traducción
   src/ws/handler.ts           # relay WS (navegador ↔ backend) con log [ws-relay]
@@ -111,3 +214,9 @@ frontend/
   src/lib/errors.js                 # errores → mensajes en español
   src/lib/debug.js                  # logs gated por ?debug=1
 ```
+
+---
+
+## Licencia
+
+[MIT](./LICENSE) © 2026 Bridge (Nerdearla Vibeathon 2026)

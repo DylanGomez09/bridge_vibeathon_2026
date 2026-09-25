@@ -1,12 +1,10 @@
+import { randomUUID } from "node:crypto";
 import { GoogleGenAI } from "@google/genai";
 import { WebSocketServer, WebSocket } from "ws";
 import type { BridgeConfig } from "../config.js";
-import { Transcriber, type StatusPhase, type StatusInfo } from "../gemini/transcriber.js";
+import { Transcriber, type TranscriberCallbacks } from "../gemini/transcriber.js";
+import { SessionRegistry, type SessionMeta } from "../sessions/registry.js";
 import { friendlySessionError } from "../errors.js";
-
-interface Send {
-  send: (payload: unknown) => void;
-}
 
 const DEBUG = process.env.BRIDGE_DEBUG === "1";
 
@@ -16,130 +14,195 @@ function toBuffer(data: WebSocket.RawData): Buffer {
   return Buffer.from(data);
 }
 
-export function registerWsHandlers(wss: WebSocketServer, config: BridgeConfig): void {
+interface ClientMessage {
+  type?: string;
+  sessionId?: string;
+  label?: string;
+  sourceLang?: string;
+  targetLang?: string;
+  ownerToken?: string;
+  reclaimSessionId?: string;
+}
+
+export interface WsRegistry {
+  readonly registry: SessionRegistry;
+  broadcastSessions: () => void;
+}
+
+export function registerWsHandlers(wss: WebSocketServer, config: BridgeConfig): WsRegistry {
   const ai = new GoogleGenAI({ apiKey: config.geminiApiKey });
 
-  wss.on("connection", (ws) => {
-    let transcriber: Transcriber | null = null;
-    let starting = false;
-    const startMs = Date.now();
+  const sendTo = (ws: WebSocket, payload: unknown): void => {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    try {
+      ws.send(JSON.stringify(payload));
+    } catch (error) {
+      if (DEBUG) console.error("[ws-relay] send falló", error);
+    }
+  };
 
-    const send: Send["send"] = (payload) => {
+  const broadcastSessions = (): void => {
+    const sessions: SessionMeta[] = registry.list();
+    const payload = { type: "sessions", sessions };
+    for (const client of wss.clients) sendTo(client, payload);
+  };
+
+  const registry = new SessionRegistry({
+    config,
+    maxSessions: config.maxSessions,
+    graceMs: config.sessionGraceMs,
+    createTranscriber: (sessionConfig, callbacks: TranscriberCallbacks) =>
+      new Transcriber(ai, sessionConfig, callbacks),
+    send: sendTo,
+    onChange: broadcastSessions,
+  });
+
+  wss.on("connection", (ws) => {
+    const clientId = randomUUID();
+    const startMs = Date.now();
+    let audioErrorNotified = false;
+
+    const send = (payload: unknown): void => {
       if (DEBUG) {
         const p = payload as
-          | { type?: string; phase?: string; attempt?: number; detail?: string; text?: string }
+          | { type?: string; phase?: string; sessionId?: string; text?: string }
           | null;
+        const short = p?.sessionId ? `[${p.sessionId.slice(0, 8)}]` : "";
         const text = p?.text ? ` "${p.text.slice(0, 120)}${p.text.length > 120 ? "…" : ""}"` : "";
         console.log(
-          `[ws-relay][T+${Date.now() - startMs}ms] ->`,
-          `${p?.type ?? "?"}${p?.phase ? `/${p.phase}` : ""}${p?.attempt ? ` (intento ${p.attempt})` : ""}${text}`,
+          `[ws-relay][T+${Date.now() - startMs}ms]${short} ->`,
+          `${p?.type ?? "?"}${p?.phase ? `/${p.phase}` : ""}${text}`,
         );
       }
-      if (ws.readyState !== WebSocket.OPEN) return;
-      try {
-        ws.send(JSON.stringify(payload));
-      } catch (error) {
-        if (DEBUG) console.error("[ws-relay] send falló", error);
-      }
+      sendTo(ws, payload);
     };
 
-    const stop = (): void => {
-      const current = transcriber;
-      transcriber = null;
-      starting = false;
-      current?.close();
+    const fail = (detail: string): void => {
+      send({ type: "status", phase: "error", sessionId: registry.subscribedSessionId(ws), detail });
     };
 
-    const onStatus = (phase: StatusPhase, detail?: string, info?: StatusInfo): void => {
-      send({ type: "status", phase, detail, ...(info ?? {}) });
-      if (phase === "ended" || phase === "failed") stop();
-    };
+    send({ type: "hello", clientId, sessions: registry.list() });
 
     ws.on("message", (data, isBinary) => {
       try {
         if (isBinary) {
-          if (!transcriber) return;
-          transcriber.sendAudio(toBuffer(data));
+          // El audio se rutea exclusivamente a la sesión de este cliente. Si no es el
+          // owner, el registro lo rechaza: así el audio de A nunca llega al pipeline de B.
+          const result = registry.pushAudio(ws, clientId, toBuffer(data));
+          if (!result.ok && !audioErrorNotified) {
+            audioErrorNotified = true;
+            fail(result.reason);
+          }
           return;
         }
 
-        let message: { type?: string };
+        let message: ClientMessage;
         try {
-          message = JSON.parse(data.toString()) as { type?: string };
+          message = JSON.parse(data.toString()) as ClientMessage;
         } catch {
-          send({ type: "status", phase: "error", detail: "Mensaje inválido del cliente" });
+          fail("Mensaje inválido del cliente");
           return;
         }
 
         switch (message.type) {
-          case "start":
-            if (transcriber || starting) {
-              send({ type: "status", phase: "error", detail: "La sesión ya está activa" });
-              return;
-            }
+          case "start": {
             if (!config.geminiApiKey) {
-              send({
-                type: "status",
-                phase: "error",
-                detail: "Gemini no está configurado: revisá la GEMINI_API_KEY en backend/.env",
-              });
+              fail(
+                "Gemini no está configurado: revisá la GEMINI_API_KEY en backend/.env",
+              );
               return;
             }
-            starting = true;
-            send({ type: "started" });
-            transcriber = new Transcriber(ai, config, {
-              onStatus,
-              onInputInterim: (text) => send({ type: "original", text, interim: true }),
-              onInput: (text) => send({ type: "original", text, interim: false }),
-              onTranslation: (text) => send({ type: "translation", text }),
-              onTurnComplete: () => send({ type: "segment" }),
-              onError: (detail) => {
-                if (DEBUG) console.log("[ws-relay][transcriber-error]", detail);
-              },
-              onClose: (code, reason) => {
-                if (DEBUG) console.log(`[ws-relay][transcriber-close] ${code} ${reason ?? ""}`);
-              },
+            const result = registry.create({
+              owner: ws,
+              ownerClientId: clientId,
+              label: message.label,
+              sourceLang: message.sourceLang,
+              targetLang: message.targetLang,
+              reclaim:
+                message.ownerToken && message.reclaimSessionId
+                  ? { sessionId: message.reclaimSessionId, ownerToken: message.ownerToken }
+                  : undefined,
             });
-            transcriber.connect().catch((error: unknown) => {
-              // Un fallo terminal ya fue notificado por onStatus("failed"/"ended").
-              if (DEBUG) {
-                console.log(
-                  "[ws-relay] connect() terminó sin sesión:",
-                  error instanceof Error ? error.message : String(error),
-                );
-              }
-              stop();
+            if (!result.ok) {
+              fail(result.reason);
+              return;
+            }
+            const { entry, ownerToken } = result;
+            // ACK primero: el cliente resuelve el arranque con este mensaje.
+            send({
+              type: "started",
+              sessionId: entry.id,
+              ownerToken,
+              meta: registry.meta(entry.id),
             });
-            break;
+            registry.connect(entry.id);
+            return;
+          }
 
-          case "end":
-            transcriber?.endTurn();
-            break;
+          case "subscribe": {
+            if (!message.sessionId) {
+              fail("Falta el sessionId para suscribirse");
+              return;
+            }
+            const result = registry.subscribe(ws, message.sessionId);
+            if (!result.ok) {
+              fail(result.reason);
+              return;
+            }
+            send({
+              type: "subscribed",
+              sessionId: message.sessionId,
+              meta: registry.meta(message.sessionId),
+              // Gemini no permite recuperar historial: sólo entra lo que se diga de aquí
+              // en adelante. Se avisa explícito para que la UI no prometa un replay.
+              replayed: false,
+            });
+            return;
+          }
 
-          case "stop":
-            stop();
-            send({ type: "status", phase: "ended" });
-            break;
+          case "unsubscribe": {
+            const target = message.sessionId ?? registry.subscribedSessionId(ws);
+            if (!target) return;
+            registry.unsubscribe(ws, target);
+            send({ type: "unsubscribed", sessionId: target });
+            return;
+          }
+
+          case "sessions": {
+            send({ type: "sessions", sessions: registry.list() });
+            return;
+          }
+
+          case "end": {
+            const result = registry.endTurn(ws);
+            if (!result.ok) fail(result.reason);
+            return;
+          }
+
+          case "stop": {
+            const result = registry.stop(ws, clientId, message.sessionId);
+            if (!result.ok) fail(result.reason);
+            return;
+          }
 
           default:
-            send({ type: "status", phase: "error", detail: "Tipo de mensaje desconocido" });
+            fail("Tipo de mensaje desconocido");
         }
       } catch (error) {
-        // Aislamiento: un error en esta sesión jamás tumba el proceso ni otras sesiones.
+        // Aislamiento: un error en una sesión jamás tumba el proceso ni otras sesiones.
         if (DEBUG) console.error("[ws-relay] error en sesión", error);
-        send({
-          type: "status",
-          phase: "failed",
-          detail: friendlySessionError(error, "La sesión tuvo un error interno"),
-        });
-        stop();
+        fail(friendlySessionError(error, "La sesión tuvo un error interno"));
       }
     });
 
-    ws.on("close", () => stop());
+    ws.on("close", () => {
+      registry.removeClient(ws, clientId);
+    });
     ws.on("error", (error) => {
       if (DEBUG) console.error("[ws-relay] ws error", error);
-      stop();
+      registry.removeClient(ws, clientId);
     });
   });
+
+  return { registry, broadcastSessions };
 }

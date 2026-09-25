@@ -11,7 +11,9 @@
     "build": "tsc",
     "start": "node dist/src/server.js",
     "test:connection": "tsx test-connection.ts",
-    "test:pipeline": "tsx test-pipeline.ts"
+    "test:pipeline": "tsx test-pipeline.ts",
+    "test:sessions": "tsx test-sessions-registry.ts",
+    "test:multisession": "tsx test-multisession.ts"
   },
   "dependencies": {
     "@google/genai": "^2.24.0",

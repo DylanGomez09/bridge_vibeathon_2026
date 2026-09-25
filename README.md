@@ -14,6 +14,7 @@ Transcripción y traducción en tiempo real **(EN → ES)** de conferencias usan
 ## Índice
 
 - [Arquitectura](#arquitectura)
+- [Multi-sesión](#multi-sesión)
 - [Cómo correr](#cómo-correr)
 - [Audios de prueba](#audios-de-prueba)
 - [Demo del jurado](#demo-del-jurado-protocolo)
@@ -31,13 +32,15 @@ Transcripción y traducción en tiempo real **(EN → ES)** de conferencias usan
 flowchart LR
   NAV["Navegador<br/>Vite · React<br/>:5173"]
   REL["Backend relay<br/>Express + ws<br/>:3001"]
+  REG["Registro de sesiones<br/>session_id → Gemini + oyentes"]
   GEM["Gemini Live API<br/>flash-live"]
   SRT["Subtítulos .srt"]
 
   NAV -->|"1 · audio PCM 16 kHz"| REL
-  REL -->|"2 · realtime input"| GEM
-  GEM -->|"3 · original + traducción"| REL
-  REL -->|"4 · original + traducción"| NAV
+  REL --> REG
+  REG -->|"2 · realtime input (1 socket por sesión)"| GEM
+  GEM -->|"3 · original + traducción"| REG
+  REG -->|"4 · original + traducción (sólo suscriptos)"| NAV
   NAV -->|"5 · descargar"| SRT
 ```
 
@@ -66,6 +69,115 @@ sequenceDiagram
 
 > [!IMPORTANT]
 > El `segment` es la unidad de sincronización: el navegador **espera** a recibirlo antes de enviar el turno siguiente. Saltarse esa espera ("overlap") es inestable con modality `audio`.
+
+---
+
+## Multi-sesión
+
+Varias sesiones conviven en el mismo backend sin mezclarse. Cada sesión tiene **su propio `session_id`**, **su propia conexión a Gemini Live** y **su propio juego de clientes suscriptos**.
+
+### Estructura del registro
+
+```text
+session_id (uuid) → {
+  id, label, sourceLang, targetLang, createdAt,
+  ownerToken,          // secreto del owner: permite recuperar la sesión tras un refresh
+  ownerId,             // clientId del dueño de la fuente de audio (null = huérfana)
+  transcriber,         // UNA conexión a Gemini Live, exclusiva de esta sesión
+  clients: Set<WS>,    // oyentes suscriptos (el owner también está)
+  phase, closing, graceUntil,
+}
+```
+
+Vive en `backend/src/sessions/registry.ts`. El mapa es privado y todas las mutaciones pasan por métodos, así que cada operación es atómica (JS es single-threaded).
+
+### Garantías
+
+- **Aislamiento de audio**: el audio binario se rutea **solo** a la sesión que ese WS tiene asignada, y **solo si es el owner**. El audio de A jamás alcanza el pipeline de B.
+- **Aislamiento de subtítulos**: **todos** los mensajes salientes llevan `sessionId`; el frontend descarta los que no son de la sesión que está mirando.
+- **Tune-in de sólo escucha**: un suscriptor recibe subtítulos pero no puede subir audio (si lo intenta, el backend lo rechaza).
+- **Baja quirúrgica**: cuando un cliente se va se lo saca de su sesión; si era el owner, se cierra **esa** sesión y solo esa. Las demás no se tocan.
+- **Sin condiciones de carrera**: el flag `closing` hace que un doble cierre sea un no-op, y la entrada sale del mapa **antes** de cerrar el transcriber, de modo que cualquier callback tardío de Gemini no encuentra la sesión y no escribe sobre nadie.
+- **Tope de sesiones**: `BRIDGE_MAX_SESSIONS` (default 4) para no comerse el rate-limit; al excederlo el cliente recibe un error explícito.
+
+### Ciclo de vida
+
+```mermaid
+stateDiagram-v2
+  [*] --> connecting: start (crea sesión + socket Gemini)
+  connecting --> ready: setupComplete
+  ready --> ready: streaming por turnos
+  ready --> reconnecting: se perdió Gemini
+  reconnecting --> ready: reconectó
+  ready --> grace: se fue el owner
+  grace --> ready: volvió con ownerToken (refresh)
+  grace --> ended: venció BRIDGE_SESSION_GRACE_MS
+  ready --> ended: stop del owner / ended / failed
+  ended --> [*]
+```
+
+> [!NOTE]
+> El **grace period** existe para que un refresh de pestaña no corte la sesión. Al crear una sesión el servidor emite un `ownerToken`; el cliente lo guarda en `sessionStorage` y lo reenvía al reconectar. Si nadie lo reclama dentro de `BRIDGE_SESSION_GRACE_MS` (15 s), la sesión se cierra aunque queden oyentes (sin owner no hay audio posible). Con `0` el cierre es inmediato.
+
+### Protocolo WebSocket
+
+**Cliente → servidor**
+
+| Mensaje | Payload | Efecto |
+|---|---|---|
+| `start` | `{label?, sourceLang?, targetLang?}` o `{reclaimSessionId, ownerToken}` | Crea una sesión (el cliente queda como owner) o recupera la suya |
+| `subscribe` | `{sessionId}` | Sintoniza una sesión existente (sólo escucha) |
+| `unsubscribe` | `{sessionId}` | Sale de la sesión |
+| `sessions` | — | Pide el listado de sesiones activas |
+| `end` | — | `endTurn` en la sesión suscripta |
+| `stop` | `{sessionId?}` | El owner cierra su sesión |
+| *binario* | PCM 16 kHz | Audio, sólo aceptado del owner |
+
+**Servidor → cliente**
+
+| Mensaje | Payload |
+|---|---|
+| `hello` | `{clientId, sessions}` al conectar |
+| `sessions` | `{sessions: SessionMeta[]}` (broadcast ante cada alta/baja) |
+| `started` | `{sessionId, ownerToken, meta}` (ACK) |
+| `subscribed` | `{sessionId, meta, replayed: false}` |
+| `sessionEnded` | `{sessionId, reason}` |
+| `status` / `original` / `translation` / `segment` | `{sessionId, ...}` |
+
+> [!WARNING]
+> `replayed: false` es a propósito: Gemini no permite recuperar historial, así que un oyente que entra a mitad de una charla sólo ve lo que se diga de ahí en más. La UI lo dice explícito en vez de prometer un replay.
+
+### El muro: varias transcripciones en una sola pantalla
+
+El panel **Muro** muestra **todas** las sesiones activas en paralelo, en una grilla y **en sólo lectura**: una tarjeta por sesión con su texto en vivo.
+
+- **Un socket WebSocket por sesión.** El protocolo impide que un WS esté suscripto a dos sesiones a la vez, así que ver varias a la vez significa abrir un socket por sesión. Por eso **no hizo falta tocar el backend** ni el aislamiento ya verificado.
+- **Nunca manda audio.** El backend rechaza el audio de quien no es owner, así que el muro no puede corromper una sesión aunque tuviera un bug.
+- **Sockets sólo mientras el muro está a la vista.** Mantener N conexiones abiertas todo el tiempo inflaría el contador de oyentes de cada sesión, así que al salir del panel se cierran.
+- **"Ver en grande"** sintoniza esa sesión en el panel de Traducción.
+
+> [!TIP]
+> El backend cuenta las suscripciones reales, así que al abrir el Muro el número de oyentes de cada sesión sube. Es honesto (son clientes conectados de verdad), pero para el demo conviene no deixar el Muro abierto mientras se mira el contador.
+
+### Probar la multi-sesión
+
+```bash
+pnpm test:sessions        # offline: ciclo de vida, carreras y aislamiento (no usa la red)
+pnpm test:multisession    # e2e real: 2 sesiones simultáneas con idiomas distintos
+```
+
+`test:sessions` corre **94 checks sin tocar Gemini** (inyecta un transcriber falso), entre ellos: el audio de A no llega a B, un oyente no puede subir audio, cierres concurrentes y dobles, callback tardío tras el cierre, grace period (incluido el token inválido), el tope de sesiones y el fan-out de varios suscriptores de una misma sesión (lo que usa el Muro).
+
+`test:multisession` levanta un backend real en un puerto efímero y corre **27 checks** contra la Gemini Live API: dos sesiones con idiomas distintos en paralelo, dos clientes suscriptos a una de ellas, y el cierre de A mientras B **sigue transcribiendo**.
+
+### Probarlo en la UI
+
+1. Abrí dos o tres pestañas de `http://localhost:5173`.
+2. En la primera, iniciá el micrófono o subí un clip → se crea la sesión A.
+3. En la segunda, hacé lo mismo con otro clip → se crea la sesión B.
+4. En la primera, entrá a **Muro**: las dos sesiones en paralelo, sólo lectura.
+5. En **Sesiones** hacés click en una fila para sintonizarla en Traducción.
+6. `BRIDGE_DEBUG=1` en el backend para ver `[sessions][<id corto>]` en cada alta/baja, y `curl http://localhost:3001/health` para listarlas.
 
 ---
 
@@ -124,7 +236,9 @@ pnpm test:pipeline backend/assets/short-demo.wav    # clip de 40 s
 | `pnpm build` | Compila backend (`tsc`) y frontend (`vite build`) |
 | `pnpm --filter @bridge/frontend lint` | Lint del frontend (`oxlint`) |
 | `pnpm test:connection [archivo]` | Smoke test contra la Gemini Live API |
-| `pnpm --filter @bridge/backend test:pipeline [archivo]` | Prueba del pipeline de audio |
+| `pnpm test:pipeline [archivo]` | Prueba del pipeline de audio |
+| `pnpm test:sessions` | Ciclo de vida multi-sesión, **offline** (94 checks, sin red) |
+| `pnpm test:multisession` | E2E multi-sesión **real**: 2 sesiones simultáneas (27 checks) |
 | `pnpm --filter @bridge/frontend preview` | Sirve el build de producción |
 
 ---
@@ -163,7 +277,7 @@ Rangos observados en varios runs (`short-demo.wav` 40 s y `short-talk.wav` 10 s)
 - **Wall-clock vs duración del audio**: ~1.75–1.9× (40 s → ~70 s; 60 s → ~114 s).
 
 > [!WARNING]
-> **Límite honesto**: la latencia por turno está dominada por la finalización de turno de Gemini con modality `audio`, no por la subida de audio. Bien para 1 sesión de demo en vivo; tiempo real sostenido (o 2+ sesiones compitiendo por el mismo rate-limit) queda al límite.
+> **Límite honesto**: la latencia por turno está dominada por la finalización de turno de Gemini con modality `audio`, no por la subida de audio. La multi-sesión está implementada y verificada (ver [Multi-sesión](#multi-sesión)), pero varias sesiones simultáneas compiten por el mismo rate-limit de Gemini: con 2 en paralelo anda bien para la demo; sostener más o más tiempo está al límite. Por eso existe `BRIDGE_MAX_SESSIONS`.
 
 ---
 
@@ -173,6 +287,9 @@ Rangos observados en varios runs (`short-demo.wav` 40 s y `short-talk.wav` 10 s)
 - **Sin interims**: la API **no emite** `interimInputTranscription` durante el streaming — el texto (original y traducción) solo baja tras `audioStreamEnd` de cada turno. Por eso el diseño es **turn-splitting** (ver el diagrama de secuencia): se envían turnos de 10 s de audio a **2×** (100 chunks de 100 ms, 50 ms/chunk), se hace `endTurn` y se espera el `segment` antes de seguir (`TURN_CHUNKS = 100`, `TURN_WAIT_MS = 20000`).
 - **`accumulatedOutput` se resetea en cada `turnComplete`**: cada segmento es autocontenido; sin esto el texto del turno anterior contamina la traducción siguiente (`backend/src/gemini/transcriber.ts`).
 - **Reconexión resiliente**: el backend reintenta el bind del puerto con backoff si el proceso anterior todavía lo ocupa (típico de `tsx watch`), y libera el puerto en `SIGINT`/`SIGTERM`. El frontend, si el ack de arranque se vence, descarta el socket y reintenta una vez.
+- **Un registro explícito, no un closure por conexión**: antes el aislamiento entre sesiones salía de que cada conexión WS fabricaba su `Transcriber` en un closure. Eso aislaba, pero no había `session_id` ni forma de listar ni de sintonizar. Ahora el aislamiento es un objeto verificable (`SessionRegistry`) con la fábrica de `Transcriber` inyectada, lo que permite testear el ciclo de vida completo **sin red** (`test:sessions`).
+- **Idiomas por sesión sin tocar el transcriber**: `Transcriber` ya recibía un `BridgeConfig` por constructor, así que el registro clona la config base y overridea `bridgeSourceLang`/`bridgeTargetLang` por sesión. Cero cambios en el pipeline de audio.
+- **Tope de sesiones en el registro, no en Gemini**: preferimos un error propio y explícito ("se alcanzó el máximo de N sesiones") a un 429 opaco de la API.
 
 ---
 
@@ -191,6 +308,8 @@ Rangos observados en varios runs (`short-demo.wav` 40 s y `short-talk.wav` 10 s)
 | `BRIDGE_RECONNECT_BASE_DELAY_MS` | `1000` | Delay base del backoff exponencial |
 | `BRIDGE_READY_TIMEOUT_MS` | `15000` | Timeout esperando `setupComplete` |
 | `BRIDGE_STALE_SESSION_MS` | `60000` | Watchdog de sesión colgada (`0` desactiva) |
+| `BRIDGE_MAX_SESSIONS` | `4` | Tope de sesiones simultáneas (una conexión a Gemini cada una) |
+| `BRIDGE_SESSION_GRACE_MS` | `15000` | Grace tras irse el owner antes de cerrar la sesión (`0` = inmediato) |
 
 ---
 
@@ -198,21 +317,28 @@ Rangos observados en varios runs (`short-demo.wav` 40 s y `short-talk.wav` 10 s)
 
 ```text
 backend/
-  src/gemini/transcriber.ts   # sesión Live de Gemini, merge + reset de traducción
-  src/ws/handler.ts           # relay WS (navegador ↔ backend) con log [ws-relay]
-  src/config.ts               # env → BridgeConfig
-  src/errors.ts               # errores crudos → mensajes en español para la UI
-  src/audio/load-pcm.ts       # carga .pcm/.wav → PCM 16 kHz mono
-  assets/                     # clips de prueba (ver "Audios de prueba")
-  test-connection.ts          # smoke test contra la Gemini Live API
-  test-pipeline.ts            # prueba del pipeline de audio
+  src/sessions/registry.ts      # registro de sesiones: alta/baja, grace, cap, aislamiento
+  src/gemini/transcriber.ts     # sesión Live de Gemini, merge + reset de traducción
+  src/ws/handler.ts             # protocolo WS multi-sesión + log [ws-relay]
+  src/config.ts                 # env → BridgeConfig
+  src/errors.ts                 # errores crudos → mensajes en español para la UI
+  src/audio/load-pcm.ts         # carga .pcm/.wav → PCM 16 kHz mono
+  assets/                       # clips de prueba (ver "Audios de prueba")
+  test-connection.ts            # smoke test contra la Gemini Live API
+  test-pipeline.ts              # prueba del pipeline de audio
+  test-sessions-registry.ts     # multi-sesión offline: carreras y aislamiento (71 checks)
+  test-multisession.ts          # e2e real de 2 sesiones simultáneas (21 checks)
 frontend/
-  src/hooks/useBridgeSession.js     # playFile: pacing 2× + turn-splitting + retry
-  src/lib/ws/bridge-socket.js       # protocolo WS (chunks binarios, endTurn, segment)
-  src/lib/audio/decode-file.js      # decodifica el archivo del navegador a PCM 16 kHz
-  src/lib/subtitles.js              # buildSrt + descarga del .srt
-  src/lib/errors.js                 # errores → mensajes en español
-  src/lib/debug.js                  # logs gated por ?debug=1
+  src/hooks/useBridgeSession.js # sesión + tune-in, pacing 2×, turn-splitting, retry
+  src/lib/ws/bridge-socket.js   # protocolo WS (chunks binarios, subscribe, endTurn)
+  src/lib/audio/decode-file.js  # decodifica el archivo del navegador a PCM 16 kHz
+  src/lib/subtitles.js          # buildSrt + descarga del .srt
+  src/lib/errors.js             # errores → mensajes en español
+  src/lib/debug.js              # logs gated por ?debug=1
+  src/ui/panels/Sessions.jsx    # lista real de sesiones activas (click = sintonizar)
+  src/ui/panels/SessionGrid.jsx  # muro: una tarjeta por sesión, sólo lectura
+  src/hooks/useSessionGrid.js    # un socket por sesión para el muro (sólo lectura)
+  src/ui/session-meta.js         # fase/idiomas compartidos entre listado y muro
 ```
 
 ---

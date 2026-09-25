@@ -27,6 +27,29 @@ const isRetryableStartError = (cause) => {
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
+// El ownerToken identifica al dueño de una sesión y permite recuperarla tras un refresh
+// de pestaña (dentro del grace period del backend). Vive en sessionStorage: muere con
+// la pestaña, que es justo lo que queremos (nadie puede suplantar ownership).
+const OWNER_STORAGE_KEY = "bridge:owner"
+
+const readOwnerRef = () => {
+  try {
+    const raw = window.sessionStorage.getItem(OWNER_STORAGE_KEY)
+    return raw ? JSON.parse(raw) : null
+  } catch {
+    return null
+  }
+}
+
+const writeOwnerRef = (value) => {
+  try {
+    if (value) window.sessionStorage.setItem(OWNER_STORAGE_KEY, JSON.stringify(value))
+    else window.sessionStorage.removeItem(OWNER_STORAGE_KEY)
+  } catch {
+    // sessionStorage bloqueado: la sesión sigue funcionando, sólo no sobrevive al refresh.
+  }
+}
+
 export function useBridgeSession() {
   const [rawPhase, setRawPhase] = useState("idle") // idle | connecting | live | reconnecting | ended | error | failed
   const [connState, setConnState] = useState("connected") // connected | reconnecting | offline
@@ -37,6 +60,9 @@ export function useBridgeSession() {
   const [sourceInfo, setSourceInfo] = useState(null)
   const [processingFile, setProcessingFile] = useState(false)
   const [progress, setProgress] = useState(0)
+  const [sessions, setSessions] = useState([])
+  const [sessionId, setSessionId] = useState(null)
+  const [isOwner, setIsOwner] = useState(false)
 
   const socketRef = useRef(null)
   const workletRef = useRef(null)
@@ -55,6 +81,26 @@ export function useBridgeSession() {
   const ackResolveRef = useRef(null)
   const streamStartRef = useRef(null)
   const segmentResolveRef = useRef(null)
+  const sessionIdRef = useRef(null)
+  // Se restaura el token guardado para que un refresh de pestaña pueda reclamar su
+  // sesión dentro del grace period del backend en vez de abrir una nueva.
+  const ownerRef = useRef(readOwnerRef())
+  const isOwnerRef = useRef(false)
+
+  const isCurrentSession = (message) => {
+    const id = message?.sessionId
+    return id ? id === sessionIdRef.current : true
+  }
+
+  const resetSubtitles = () => {
+    setSegments([])
+    setCurrentOriginal(null)
+    setCurrentTranslation("")
+    originalRef.current = ""
+    translationRef.current = ""
+    segmentIdRef.current = 0
+    streamStartRef.current = performance.now()
+  }
 
   const applyPhase = (next) => {
     phaseRef.current = next
@@ -112,9 +158,63 @@ export function useBridgeSession() {
       }
     })
 
-    socket.on("started", () => ackResolveRef.current?.())
+    socket.on("started", (message) => {
+      if (message.sessionId) {
+        sessionIdRef.current = message.sessionId
+        setSessionId(message.sessionId)
+        isOwnerRef.current = true
+        setIsOwner(true)
+        if (message.ownerToken) {
+          ownerRef.current = { sessionId: message.sessionId, ownerToken: message.ownerToken }
+          writeOwnerRef(ownerRef.current)
+        }
+      }
+      ackResolveRef.current?.()
+    })
+
+    socket.on("hello", (message) => {
+      setSessions(message.sessions ?? [])
+    })
+
+    socket.on("sessions", (message) => {
+      setSessions(message.sessions ?? [])
+    })
+
+    socket.on("subscribed", (message) => {
+      if (!message.sessionId) return
+      sessionIdRef.current = message.sessionId
+      setSessionId(message.sessionId)
+      isOwnerRef.current = false
+      setIsOwner(false)
+    })
+
+    socket.on("unsubscribed", (message) => {
+      if (message.sessionId === sessionIdRef.current) {
+        sessionIdRef.current = null
+        setSessionId(null)
+      }
+    })
+
+    socket.on("sessionEnded", (message) => {
+      if (ownerRef.current?.sessionId === message.sessionId) {
+        ownerRef.current = null
+        writeOwnerRef(null)
+      }
+      if (message.sessionId === sessionIdRef.current) {
+        sessionIdRef.current = null
+        setSessionId(null)
+        isOwnerRef.current = false
+        setIsOwner(false)
+        resetSubtitles()
+        if (message.reason === "owner-timeout" || message.reason === "owner-disconnected") {
+          setError("Se perdió la fuente de audio: la sesión se cerró.")
+          applyPhase("ended")
+        }
+      }
+    })
 
     socket.on("original", (message) => {
+      if (!isCurrentSession(message)) return
       const text = message.text ?? ""
       if (message.interim) {
         setCurrentOriginal({ text, interim: true })
@@ -125,11 +225,13 @@ export function useBridgeSession() {
     })
 
     socket.on("translation", (message) => {
+      if (!isCurrentSession(message)) return
       translationRef.current = message.text ?? ""
       setCurrentTranslation(translationRef.current)
     })
 
-    socket.on("segment", () => {
+    socket.on("segment", (message) => {
+      if (!isCurrentSession(message)) return
       const segment = {
         id: segmentIdRef.current++,
         ts: positionMs(),
@@ -183,7 +285,19 @@ export function useBridgeSession() {
     const task = (async () => {
       try {
         const socket = await getSocket()
-        socket.start()
+        if (isOwnerRef.current && ownerRef.current) {
+          // Recuperamos la sesión en vez de crear otra: si el backend aguantó, no
+          // duplicamos la conexión a Gemini; si reinició, el token no matchea y el
+          // backend crea una sesión nueva.
+          socket.start({
+            reclaimSessionId: ownerRef.current.sessionId,
+            ownerToken: ownerRef.current.ownerToken,
+          })
+        } else if (sessionIdRef.current) {
+          socket.subscribe(sessionIdRef.current)
+        } else {
+          socket.start()
+        }
         applyPhase("connecting")
         setError(null)
         await new Promise((resolve) => setTimeout(resolve, RESYNC_SETTLE_MS))
@@ -223,6 +337,21 @@ export function useBridgeSession() {
     return connectSocket()
   }
 
+  const ensureSocket = async () => {
+    const socket = socketRef.current
+    if (socket && !socket.destroyed) return socket
+    return getSocket()
+  }
+
+  const refreshSessions = async () => {
+    try {
+      const socket = await ensureSocket()
+      socket.requestSessions()
+    } catch {
+      // Sin conexión: se conserva la última lista conocida.
+    }
+  }
+
   const beginSession = async (resume = false) => {
     setError(null)
     applyPhase("connecting")
@@ -239,10 +368,18 @@ export function useBridgeSession() {
     stoppedRef.current = false
     wantSessionRef.current = true
     ackResolveRef.current = null
+    const reclaim = ownerRef.current
 
     const attemptOnce = async () => {
       const socket = await getSocket()
-      socket.start()
+      if (reclaim) {
+        socket.start({
+          reclaimSessionId: reclaim.sessionId,
+          ownerToken: reclaim.ownerToken,
+        })
+      } else {
+        socket.start({ label: new URLSearchParams(window.location.search).get("session") ?? undefined })
+      }
 
       await new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
@@ -396,6 +533,42 @@ export function useBridgeSession() {
     wantSessionRef.current = false
   }
 
+  /**
+   * Sintoniza una sesión de la lista. Deja de ver la anterior y se suscribe a la
+   * nueva: el backend garantiza que sólo llegue el audio/subtítulo de esa sesión.
+   */
+  const tuneTo = async (nextId) => {
+    if (!nextId || nextId === sessionIdRef.current) return
+    let socket
+    try {
+      socket = await ensureSocket()
+    } catch {
+      setError("No se pudo conectar al servidor para sintonizar la sesión.")
+      return
+    }
+    const previous = sessionIdRef.current
+    if (previous) socket.unsubscribe(previous)
+    sessionIdRef.current = nextId
+    setSessionId(nextId)
+    isOwnerRef.current = false
+    setIsOwner(false)
+    setError(null)
+    resetSubtitles()
+    socket.subscribe(nextId)
+  }
+
+  const leaveSession = () => {
+    const socket = socketRef.current
+    const previous = sessionIdRef.current
+    if (!socket || !previous) return
+    socket.unsubscribe(previous)
+    sessionIdRef.current = null
+    setSessionId(null)
+    isOwnerRef.current = false
+    setIsOwner(false)
+    resetSubtitles()
+  }
+
   const stop = () => {
     stoppedRef.current = true
     wantSessionRef.current = false
@@ -411,9 +584,15 @@ export function useBridgeSession() {
     }
     settleReady("reject", new Error("Sesión detenida"))
     socket?.endTurn()
-    socket?.stop()
+    socket?.stop(sessionIdRef.current ?? undefined)
     socket?.close()
     socketRef.current = null
+    sessionIdRef.current = null
+    setSessionId(null)
+    isOwnerRef.current = false
+    setIsOwner(false)
+    ownerRef.current = null
+    writeOwnerRef(null)
     if (gateUnlockRef.current) {
       gateUnlockRef.current()
       gateUnlockRef.current = null
@@ -445,8 +624,14 @@ export function useBridgeSession() {
     sourceInfo,
     processingFile,
     progress,
+    sessions,
+    sessionId,
+    isOwner,
     startMic,
     playFile,
     stop,
+    tuneTo,
+    leaveSession,
+    refreshSessions,
   }
 }

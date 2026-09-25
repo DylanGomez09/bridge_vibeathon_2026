@@ -1,93 +1,103 @@
 import { UsersIcon } from "../icons.jsx"
+import { langBadge, sessionStatus, shortId } from "../session-meta.js"
 
-const SESSIONS = [
-  {
-    id: 1,
-    title: "Nerdearla 2026 — Auditorio principal",
-    detail: "Stuart Russell · Charla plenaria",
-    langs: "EN → ES",
-    live: true,
-    listeners: 142,
-  },
-  {
-    id: 2,
-    title: "Track IA — Sala Cóndor",
-    detail: "Construyendo subtítulos en tiempo real",
-    langs: "EN → ES",
-    live: true,
-    listeners: 87,
-  },
-  {
-    id: 3,
-    title: "Workshop: LLMs para todos",
-    detail: "Hands-on con Gemini Live",
-    langs: "EN → ES",
-    live: true,
-    listeners: 43,
-  },
-  {
-    id: 4,
-    title: "Keynote de cierre",
-    detail: "Resumen del día",
-    langs: "EN → ES",
-    live: false,
-    listeners: 0,
-  },
-]
+export default function Sessions({
+  connState,
+  sessions,
+  currentSessionId,
+  isOwner,
+  onTune,
+  onRefresh,
+}) {
+  const list = sessions ?? []
+  const offline = connState === "offline"
 
-function realStatus(phase, connState) {
-  if (connState === "offline") {
-    return {
-      dot: "dot-idle",
-      note: "Sesión temporalmente sin conexión",
-    }
+  if (offline) {
+    return (
+      <div className="content">
+        <div className="session-list" aria-label="Sesiones activas">
+          <article className="session past">
+            <span className="sess-dot dot-idle" aria-hidden="true" />
+            <div className="session-meta">
+              <h3 className="sess-title">Sin conexión con el servidor</h3>
+              <p className="sess-note">No se pueden listar las sesiones activas.</p>
+            </div>
+          </article>
+        </div>
+      </div>
+    )
   }
-  if (phase === "reconnecting" || phase === "connecting") {
-    return {
-      dot: "dot-reconnecting",
-      note: "Reconectando la sesión…",
-    }
-  }
-  if (phase === "failed" || phase === "error") {
-    return {
-      dot: "dot-idle",
-      note: "No se pudo restablecer la sesión",
-    }
-  }
-  return { dot: "dot-live", note: null }
-}
 
-export default function Sessions({ phase, connState }) {
-  const status = realStatus(phase, connState)
+  if (list.length === 0) {
+    return (
+      <div className="content">
+        <div className="session-list" aria-label="Sesiones activas">
+          <article className="session past">
+            <span className="sess-dot dot-idle" aria-hidden="true" />
+            <div className="session-meta">
+              <h3 className="sess-title">Todavía no hay sesiones</h3>
+              <p className="sess-note">
+                Abrí una sesión desde el micrófono o un archivo. Acá vas a poder sintonizar las
+                demás.
+              </p>
+            </div>
+            <div className="sess-right">
+              <button type="button" className="btn-ghost" onClick={() => onRefresh?.()}>
+                Actualizar
+              </button>
+            </div>
+          </article>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="content">
       <div className="session-list" aria-label="Sesiones activas">
-        {SESSIONS.map((session) => {
-          const active = session.live && session.id === 1
-          const row = active ? status : { dot: session.live ? "dot-live" : "dot-idle", note: null }
+        {list.map((session) => {
+          const tuned = session.id === currentSessionId
+          const status = sessionStatus(session)
+          const dot = status.dot
           return (
             <article
-              className={`session${session.live ? "" : " past"}${active ? " session-real" : ""}`}
+              className={`session${tuned ? " session-real" : ""}`}
               key={session.id}
+              onClick={() => !tuned && onTune?.(session.id)}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault()
+                  if (!tuned) onTune?.(session.id)
+                }
+              }}
+              aria-pressed={tuned}
             >
-              <span className={`sess-dot ${row.dot}`} aria-hidden="true" />
+              <span className={`sess-dot ${dot}`} aria-hidden="true" />
               <div className="session-meta">
-                <h3 className="sess-title">{session.title}</h3>
-                <p className="sess-sub">{session.detail}</p>
-                {row.note ? <p className="sess-note">{row.note}</p> : null}
+                <h3 className="sess-title">{session.label}</h3>
+                <p className="sess-sub">
+                  {shortId(session.id)}
+                  {tuned ? (isOwner ? " · tu sesión" : " · sintonizada") : ""}
+                </p>
+                {status.note ? <p className="sess-note">{status.note}</p> : null}
               </div>
               <div className="sess-right">
-                <span className="lang-badge">{session.langs}</span>
+                <span className="lang-badge">{langBadge(session)}</span>
                 <span className="listeners">
                   <UsersIcon size={14} />
-                  {session.listeners} {session.listeners === 1 ? "oyente" : "oyentes"}
+                  {session.clients} {session.clients === 1 ? "oyente" : "oyentes"}
                 </span>
               </div>
             </article>
           )
         })}
       </div>
+      <p className="sess-note">
+        Sintonizar muestra sólo los subtítulos de esa sesión: cada una tiene su propia conexión a
+        Gemini Live y su propio audio. ID completo: {shortId(currentSessionId)}.
+      </p>
     </div>
   )
 }

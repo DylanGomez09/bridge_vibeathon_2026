@@ -2,8 +2,7 @@ import Controls from "../../components/Controls.jsx"
 import Segment from "../../components/Segment.jsx"
 import LiveBadge from "../../components/LiveBadge.jsx"
 import { downloadSrt } from "../../lib/subtitles.js"
-
-const LANG_LABEL = { en: "EN", es: "ES", pt: "PT", fr: "FR", de: "DE" }
+import { langName } from "../session-meta.js"
 
 export default function TranslationPanel({
   phase,
@@ -20,10 +19,20 @@ export default function TranslationPanel({
   displayMode,
   sourceLang,
   targetLang,
+  sessions,
+  sessionId,
+  isOwner,
+  leaveSession,
 }) {
   const hasLive =
     (currentOriginal?.text ?? "").length > 0 || (currentTranslation ?? "").length > 0
   const pendingTranslation = hasLive && (currentTranslation ?? "").length === 0
+
+  // Los idiomas de la sesión manda sobre los prefs: al sintonizar otra sesión, las
+  // columnas tienen que mostrar los idiomas reales de esa sesión, no los del cliente.
+  const current = (sessions ?? []).find((item) => item.id === sessionId)
+  const shownSource = current?.sourceLang ?? sourceLang
+  const shownTarget = current?.targetLang ?? targetLang
 
   const live = {
     ts: null,
@@ -53,6 +62,22 @@ export default function TranslationPanel({
         <LiveBadge phase={phase} />
       </div>
 
+      <p className="sess-note">
+        {sessionId ? (
+          <>
+            Sesión <code>{sessionId.slice(0, 8)}</code>
+            {current ? ` · ${current.label}` : ""} · {isOwner ? "sos el owner (enviás el audio)" : "oyente (sólo recibís)"}
+          </>
+        ) : (
+          "Sin sesión: iniciá el micrófono o subí un archivo, o sintonizá una sesión existente."
+        )}
+        {sessionId && !isOwner ? (
+          <button type="button" className="btn-ghost" onClick={() => leaveSession()}>
+            Salir de la sesión
+          </button>
+        ) : null}
+      </p>
+
       {error ? (
         <div className="error-banner" role="alert">
           {error}
@@ -62,8 +87,8 @@ export default function TranslationPanel({
       <section className={`card translation-panel${modeClass}${reconnectingClass}`} data-testid="transcript-panel">
         <div className="translation-head">
           <span aria-hidden="true" />
-          <span className="col-original">Original ({LANG_LABEL[sourceLang] ?? "EN"})</span>
-          <span className="col-translation">Traducción ({LANG_LABEL[targetLang] ?? "ES"})</span>
+          <span className="col-original">Original ({langName(shownSource)})</span>
+          <span className="col-translation">Traducción ({langName(shownTarget)})</span>
         </div>
         <div className="translation-scroll">
           {segments.length === 0 && !hasLive ? (

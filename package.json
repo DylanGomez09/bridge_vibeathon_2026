@@ -6,7 +6,10 @@
   "scripts": {
     "dev": "concurrently -k -n backend,frontend -c blue,green \"pnpm --filter @bridge/backend dev\" \"pnpm --filter @bridge/frontend dev\"",
     "build": "pnpm --filter @bridge/backend build && pnpm --filter @bridge/frontend build",
-    "test:connection": "pnpm --filter @bridge/backend test:connection"
+    "test:connection": "pnpm --filter @bridge/backend test:connection",
+    "test:pipeline": "pnpm --filter @bridge/backend test:pipeline",
+    "test:sessions": "pnpm --filter @bridge/backend test:sessions",
+    "test:multisession": "pnpm --filter @bridge/backend test:multisession"
   },
 "devDependencies": {
     "concurrently": "^9.1.2"

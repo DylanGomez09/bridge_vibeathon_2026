@@ -28,3 +28,6 @@ Thumbs.db
 # misc
 *.local
 coverage/
+
+# scripts de depuración locales (con rutas absolutas de la máquina)
+backend/_*.mjs

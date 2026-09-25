@@ -107,7 +107,7 @@ export class BridgeSocket {
         debug(
           `[ws] <- ${message.type}${message.phase ? `/${message.phase}` : ""}${message.text ? ` ${message.text.slice(0, 120)}` : ""} (T5: ${elapsedSec(this.t0)})`,
         )
-        this.emit(message)
+        this.emit(message.type, message)
       } catch {
         // mensaje no JSON: se ignora
       }
@@ -154,21 +154,40 @@ export class BridgeSocket {
     }
   }
 
-  start() {
-    debug(`[ws] -> start (${elapsedSec(this.t0)})`)
-    // Si el socket sigue reconectándose, el start se pierde (no hay re-send).
-    // Mejor enviarlo en cuanto vuelva a estar abierto (como sendAudioChunk).
-    const ws = this.ws
-    if (ws?.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "start" }))
-      return
+  sendCommand(payload) {
+    if (this.destroyed || this.manuallyClosed) return false
+    const send = () => {
+      if (this.ws?.readyState !== WebSocket.OPEN) return false
+      this.ws.send(JSON.stringify(payload))
+      return true
     }
-    this.waitOpen().then(() => {
-      if (!this.destroyed && !this.manuallyClosed) {
-        debug(`[ws] -> start (tras waitOpen, ${elapsedSec(this.t0)})`)
-        this.ws?.send(JSON.stringify({ type: "start" }))
-      }
+    if (send()) return true
+    // Si el socket se está reconectando, el comando se pierde. Lo reenviamos apenas
+    // vuelva a estar abierto en vez de descartarlo.
+    return this.waitOpen().then(() => {
+      if (this.destroyed || this.manuallyClosed) return false
+      return send()
     })
+  }
+
+  start(options = {}) {
+    debug(`[ws] -> start (${elapsedSec(this.t0)})`)
+    return this.sendCommand({ type: "start", ...options })
+  }
+
+  subscribe(sessionId) {
+    debug(`[ws] -> subscribe ${sessionId}`)
+    return this.sendCommand({ type: "subscribe", sessionId })
+  }
+
+  unsubscribe(sessionId) {
+    if (!sessionId) return false
+    debug(`[ws] -> unsubscribe ${sessionId}`)
+    return this.sendCommand({ type: "unsubscribe", sessionId })
+  }
+
+  requestSessions() {
+    return this.sendCommand({ type: "sessions" })
   }
 
   async sendAudioChunk(chunk) {
@@ -206,16 +225,12 @@ export class BridgeSocket {
 
   endTurn() {
     debug(`[ws] -> end (${elapsedSec(this.t0)})`)
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ type: "end" }))
-    }
+    return this.sendCommand({ type: "end" })
   }
 
-  stop() {
-    debug(`[ws] -> stop (${elapsedSec(this.t0)})`)
-    if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ type: "stop" }))
-    }
+  stop(sessionId) {
+    debug(`[ws] -> stop${sessionId ? ` ${sessionId}` : ""} (${elapsedSec(this.t0)})`)
+    return this.sendCommand(sessionId ? { type: "stop", sessionId } : { type: "stop" })
   }
 
   close() {

@@ -1148,22 +1148,23 @@ button {
   padding: 1.1rem 1.3rem;
 }
 
-.session .sess-dot {
+.sess-dot {
   width: 10px;
   height: 10px;
   border-radius: 50%;
   background: var(--color-live);
   animation: pulse 1.4s ease-in-out infinite;
   transition: background-color 0.25s ease, opacity 0.25s ease;
+  flex: 0 0 auto;
 }
 
-.session .sess-dot.dot-idle,
+.sess-dot.dot-idle,
 .session.past .sess-dot {
   background: var(--color-text-secondary);
   animation: none;
 }
 
-.session .sess-dot.dot-reconnecting {
+.sess-dot.dot-reconnecting {
   background: var(--color-text-secondary);
   animation: pulse 2.2s ease-in-out infinite;
 }
@@ -1213,6 +1214,123 @@ button {
 }
 
 .listeners {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+/* ------------------------------------------------------------- session grid */
+.session-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1rem;
+  align-items: start;
+}
+
+@media (min-width: 900px) {
+  .session-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1440px) {
+  .session-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+.session-grid-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  min-width: 0;
+  background: var(--color-surface);
+  border: 1px solid
+    color-mix(in srgb, var(--color-text-secondary) 30%, transparent);
+  border-radius: var(--radius-md);
+  padding: 1rem 1.1rem 0.9rem;
+}
+
+.session-grid-head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  min-width: 0;
+}
+
+.session-grid-titles {
+  flex: 1;
+  min-width: 0;
+}
+
+.session-grid-titles h3 {
+  font-size: 0.95rem;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-grid-feed,
+.session-grid-live {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  min-width: 0;
+}
+
+.session-grid-seg {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.4rem 0.55rem;
+  border-left: 2px solid
+    color-mix(in srgb, var(--color-text-secondary) 35%, transparent);
+  min-width: 0;
+}
+
+.session-grid-seg .original,
+.session-grid-live .original {
+  font-size: 0.8rem;
+  color: var(--color-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.session-grid-seg .translation,
+.session-grid-live .translation {
+  font-size: 0.88rem;
+  font-weight: 600;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.session-grid-live {
+  padding: 0.5rem 0.6rem;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-brand) 6%, var(--color-bg));
+}
+
+.session-grid-empty {
+  font-size: 0.85rem;
+  color: var(--color-text-secondary);
+}
+
+.session-grid-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding-top: 0.7rem;
+  margin-top: auto;
+  border-top: 1px solid
+    color-mix(in srgb, var(--color-text-secondary) 22%, transparent);
+  color: var(--color-text-secondary);
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+
+.session-grid-foot .btn-ghost {
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;

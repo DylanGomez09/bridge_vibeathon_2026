@@ -10,21 +10,25 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: "/ws" });
 
+const { registry } = registerWsHandlers(wss, config);
+
 app.get("/health", (_req, res) => {
   res.json({
     ok: true,
     service: "bridge-backend",
     hasGeminiKey: Boolean(config.geminiApiKey),
     geminiLiveModel: config.geminiLiveModel,
+    activeSessions: registry.size,
+    sessions: registry.list(),
     bridge: {
       responseModality: config.bridgeResponseModality,
       sourceLang: config.bridgeSourceLang,
       targetLang: config.bridgeTargetLang,
+      maxSessions: config.maxSessions,
+      sessionGraceMs: config.sessionGraceMs,
     },
   });
 });
-
-registerWsHandlers(wss, config);
 
 server.listen(config.port, () => {
   console.log(`[bridge] backend escuchando en http://localhost:${config.port}`);
@@ -74,6 +78,7 @@ const shutdown = (signal: string, code: number) => {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(`[bridge] ${signal} recibido: liberando puerto ${config.port}…`);
+  registry.closeAll("server-shutdown");
   const force = setTimeout(() => process.exit(code), 3000);
   force.unref();
   for (const client of wss.clients) client.terminate();

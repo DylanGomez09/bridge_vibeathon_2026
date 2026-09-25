@@ -33,6 +33,8 @@ export default function TranslationPanel({
 
   const modeClass =
     displayMode === "single" ? " is-single" : displayMode === "subtitles" ? " is-sub" : ""
+  const reconnectingClass =
+    phase === "reconnecting" || phase === "offline" ? " is-reconnecting" : ""
 
   return (
     <div className="content tight">
@@ -57,7 +59,7 @@ export default function TranslationPanel({
         </div>
       ) : null}
 
-      <section className={`card translation-panel${modeClass}`} data-testid="transcript-panel">
+      <section className={`card translation-panel${modeClass}${reconnectingClass}`} data-testid="transcript-panel">
         <div className="translation-head">
           <span aria-hidden="true" />
           <span className="col-original">Original ({LANG_LABEL[sourceLang] ?? "EN"})</span>

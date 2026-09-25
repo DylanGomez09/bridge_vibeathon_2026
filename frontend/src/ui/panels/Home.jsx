@@ -4,6 +4,9 @@ const PHASE = {
   idle: { text: "En espera", dot: "dot-idle" },
   connecting: { text: "Conectando…", dot: "dot-brand" },
   live: { text: "Sesión en vivo", dot: "dot-live" },
+  reconnecting: { text: "Reconectando sesión…", dot: "dot-reconnecting" },
+  failed: { text: "Sesión caída", dot: "dot-idle" },
+  offline: { text: "Sin conexión", dot: "dot-idle" },
   ended: { text: "Sesión finalizada", dot: "dot-idle" },
   error: { text: "Error en la sesión", dot: "dot-idle" },
 }

@@ -2,6 +2,10 @@ const LABELS = {
   idle: { text: "En espera", dot: "gray" },
   connecting: { text: "Conectando", dot: "blue" },
   live: { text: "En vivo", dot: "coral" },
+  reconnecting: { text: "Reconectando…", dot: "reconnecting" },
+  failed: { text: "Sesión caída", dot: "gray" },
+  error: { text: "Error en la sesión", dot: "gray" },
+  offline: { text: "Desconectado", dot: "gray" },
   ended: { text: "Finalizado", dot: "gray" },
 }
 

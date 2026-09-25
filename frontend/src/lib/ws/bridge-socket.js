@@ -2,41 +2,40 @@ import { debug, elapsedSec } from "../debug.js"
 
 const DEFAULT_URL = import.meta.env.VITE_WS_URL ?? "ws://localhost:3001/ws"
 
+const BACKOFF_DELAYS = [800, 1600, 3200]
+const LONG_RETRY_MS = 5000
+const CONNECT_TIMEOUT_MS = 20000
+
 export class BridgeSocket {
   ws = null
   handlers = new Map()
-  t0 = null
+  t0 = 0
   sentChunks = 0
   sentBytes = 0
   lastTickAt = 0
+  manuallyClosed = false
+  destroyed = false
+  connectResolve = null
+  connectReject = null
+  connectTimer = null
+  retryTimer = null
+  reconnectAttempts = 0
+  openWaiters = []
 
   connect() {
     return new Promise((resolve, reject) => {
       this.t0 = performance.now()
-      const ws = new WebSocket(DEFAULT_URL)
-      this.ws = ws
-      ws.onopen = () => {
-        debug(`[ws] conectado a ${DEFAULT_URL} (T1+: ${elapsedSec(this.t0)})`)
-        resolve()
-      }
-      ws.onerror = () => {
-        debug(`[ws] error de conexión a ${DEFAULT_URL}`)
-        reject(new Error(`No se pudo conectar a ${DEFAULT_URL}`))
-      }
-      ws.onclose = (event) => {
-        debug(`[ws] close (code ${event.code}${event.reason ? ` ${event.reason}` : ""})`)
-        this.emit("close", event)
-      }
-      ws.onmessage = (event) => {
-        if (typeof event.data !== "string") return
-        try {
-          const message = JSON.parse(event.data)
-          debug(`[ws] <- ${message.type}${message.phase ? `/${message.phase}` : ""}${message.text ? ` ${message.text.slice(0, 120)}` : ""} (T5: ${elapsedSec(this.t0)})`)
-          this.emit(message)
-        } catch {
-          // mensaje no JSON: se ignora
+      this.connectResolve = resolve
+      this.connectReject = reject
+      this.connectTimer = setTimeout(() => {
+        if (this.connectReject) {
+          const rejectConnect = this.connectReject
+          this.connectReject = null
+          this.connectResolve = null
+          rejectConnect(new Error(`No se pudo conectar a ${DEFAULT_URL}`))
         }
-      }
+      }, CONNECT_TIMEOUT_MS)
+      this.openSocket()
     })
   }
 
@@ -46,34 +45,162 @@ export class BridgeSocket {
     this.handlers.set(type, list)
   }
 
-  emit(message) {
-    const list = this.handlers.get(message.type) ?? []
-    list.forEach((handler) => handler(message))
+  emit(type, payload = {}) {
+    const list = this.handlers.get(type) ?? []
+    list.forEach((handler) => handler(payload))
   }
 
-  tickChunkTick() {
-    const now = performance.now()
-    if (now - this.lastTickAt >= 10_000) {
-      this.lastTickAt = now
-      debug(`[ws] bin subidos: ${this.sentChunks} chunks / ${this.sentBytes} bytes (${elapsedSec(this.t0)})`)
+  openSocket() {
+    if (this.destroyed) return
+    this.closeCurrentSocket()
+
+    const ws = new WebSocket(DEFAULT_URL)
+    this.ws = ws
+
+    ws.onopen = () => {
+      if (this.ws !== ws) return
+      this.reconnectAttempts = 0
+      debug(`[ws] conectado a ${DEFAULT_URL} (T1+: ${elapsedSec(this.t0)})`)
+      if (this.connectTimer) {
+        clearTimeout(this.connectTimer)
+        this.connectTimer = null
+      }
+      if (this.connectResolve) {
+        const resolve = this.connectResolve
+        this.connectResolve = null
+        this.connectReject = null
+        resolve()
+      }
+      this.settleOpenWaiters()
+      this.emit("connected")
+    }
+
+    ws.onerror = () => {
+      debug(`[ws] error de conexión a ${DEFAULT_URL}`)
+      // El cierre (onclose) siguiente dispara el reintento.
+    }
+
+    ws.onclose = (event) => {
+      debug(`[ws] close (code ${event.code}${event.reason ? ` ${event.reason}` : ""})`)
+      if (this.ws !== ws) return
+      this.ws = null
+      if (this.manuallyClosed || this.destroyed) {
+        this.settleOpenWaiters()
+        this.emit("close", event)
+        return
+      }
+      if (this.connectReject) {
+        const reject = this.connectReject
+        this.connectReject = null
+        this.connectResolve = null
+        reject(new Error(`No se pudo conectar a ${DEFAULT_URL}`))
+      }
+      this.emit("reconnecting")
+      this.scheduleReconnect()
+    }
+
+    ws.onmessage = (event) => {
+      if (this.ws !== ws) return
+      if (typeof event.data !== "string") return
+      try {
+        const message = JSON.parse(event.data)
+        debug(
+          `[ws] <- ${message.type}${message.phase ? `/${message.phase}` : ""}${message.text ? ` ${message.text.slice(0, 120)}` : ""} (T5: ${elapsedSec(this.t0)})`,
+        )
+        this.emit(message)
+      } catch {
+        // mensaje no JSON: se ignora
+      }
+    }
+  }
+
+  scheduleReconnect() {
+    if (this.destroyed || this.retryTimer) return
+    let delay
+    if (this.reconnectAttempts < BACKOFF_DELAYS.length) {
+      delay = BACKOFF_DELAYS[this.reconnectAttempts]
+    } else {
+      delay = LONG_RETRY_MS
+      this.emit("offline", {})
+    }
+    this.reconnectAttempts += 1
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null
+      if (!this.destroyed) this.openSocket()
+    }, delay)
+  }
+
+  waitOpen() {
+    if (this.ws?.readyState === WebSocket.OPEN) return Promise.resolve()
+    if (this.destroyed || this.manuallyClosed) return Promise.resolve()
+    return new Promise((resolve) => this.openWaiters.push(resolve))
+  }
+
+  settleOpenWaiters() {
+    const list = this.openWaiters
+    this.openWaiters = []
+    list.forEach((resolve) => resolve())
+  }
+
+  closeCurrentSocket() {
+    const ws = this.ws
+    this.ws = null
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+      try {
+        ws.close()
+      } catch {
+        // socket ya cerrado
+      }
     }
   }
 
   start() {
     debug(`[ws] -> start (${elapsedSec(this.t0)})`)
-    this.ws?.send(JSON.stringify({ type: "start" }))
+    // Si el socket sigue reconectándose, el start se pierde (no hay re-send).
+    // Mejor enviarlo en cuanto vuelva a estar abierto (como sendAudioChunk).
+    const ws = this.ws
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "start" }))
+      return
+    }
+    this.waitOpen().then(() => {
+      if (!this.destroyed && !this.manuallyClosed) {
+        debug(`[ws] -> start (tras waitOpen, ${elapsedSec(this.t0)})`)
+        this.ws?.send(JSON.stringify({ type: "start" }))
+      }
+    })
   }
 
-  sendAudioChunk(chunk) {
+  async sendAudioChunk(chunk) {
+    if (this.destroyed || this.manuallyClosed) return false
     if (this.ws?.readyState === WebSocket.OPEN) {
-      const chunkIndex = this.sentChunks + 1
-      this.sentChunks += 1
-      this.sentBytes += chunk.byteLength
-      if (chunkIndex === 1) {
-        debug(`[ws] -> primer chunk binario (chunk 1, ${chunk.byteLength} bytes) (T1: ${elapsedSec(this.t0)})`)
-      }
-      this.tickChunkTick()
+      this.trackChunk(chunk)
       this.ws.send(chunk)
+      return true
+    }
+    await this.waitOpen()
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.trackChunk(chunk)
+      this.ws.send(chunk)
+      return true
+    }
+    return false
+  }
+
+  trackChunk(chunk) {
+    this.sentChunks += 1
+    this.sentBytes += chunk.byteLength
+    if (this.sentChunks === 1) {
+      debug(
+        `[ws] -> primer chunk binario (chunk 1, ${chunk.byteLength} bytes) (T1: ${elapsedSec(this.t0)})`,
+      )
+    }
+    const now = performance.now()
+    if (now - this.lastTickAt >= 10_000) {
+      this.lastTickAt = now
+      debug(
+        `[ws] bin subidos: ${this.sentChunks} chunks / ${this.sentBytes} bytes (${elapsedSec(this.t0)})`,
+      )
     }
   }
 
@@ -92,7 +219,17 @@ export class BridgeSocket {
   }
 
   close() {
-    this.ws?.close()
-    this.ws = null
+    this.manuallyClosed = true
+    this.destroyed = true
+    if (this.connectTimer) {
+      clearTimeout(this.connectTimer)
+      this.connectTimer = null
+    }
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer)
+      this.retryTimer = null
+    }
+    this.settleOpenWaiters()
+    this.closeCurrentSocket()
   }
 }

@@ -1090,6 +1090,7 @@ button {
   height: 9px;
   border-radius: 50%;
   flex-shrink: 0;
+  transition: background-color 0.25s ease, opacity 0.25s ease;
 }
 
 .dot-live {
@@ -1099,6 +1100,12 @@ button {
 
 .dot-idle {
   background: var(--color-text-secondary);
+  animation: none;
+}
+
+.dot-reconnecting {
+  background: var(--color-text-secondary);
+  animation: pulse 2.2s ease-in-out infinite;
 }
 
 .dot-brand {
@@ -1147,11 +1154,25 @@ button {
   border-radius: 50%;
   background: var(--color-live);
   animation: pulse 1.4s ease-in-out infinite;
+  transition: background-color 0.25s ease, opacity 0.25s ease;
 }
 
+.session .sess-dot.dot-idle,
 .session.past .sess-dot {
   background: var(--color-text-secondary);
   animation: none;
+}
+
+.session .sess-dot.dot-reconnecting {
+  background: var(--color-text-secondary);
+  animation: pulse 2.2s ease-in-out infinite;
+}
+
+.sess-note {
+  margin-top: 0.35rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--color-text-secondary);
 }
 
 .session-meta .sess-title {
@@ -1314,6 +1335,14 @@ button {
 .segment-live .segment-original,
 .segment-live .segment-translation {
   font-weight: 600;
+}
+
+.translation-panel .segment-live {
+  transition: opacity 0.35s ease;
+}
+
+.translation-panel.is-reconnecting .segment-live {
+  opacity: 0.55;
 }
 
 .translation-panel .is-single .segment,
@@ -1485,6 +1514,7 @@ button {
   border-radius: 50%;
   background: var(--color-live);
   animation: pulse 1.4s ease-in-out infinite;
+  transition: background-color 0.25s ease, opacity 0.25s ease;
 }
 
 .live-badge .dot.blue {
@@ -1496,6 +1526,11 @@ button {
   animation: none;
 }
 
+.live-badge .dot.reconnecting {
+  background: var(--color-text-secondary);
+  animation: pulse 2.2s ease-in-out infinite;
+}
+
 .error-banner {
   background: color-mix(in srgb, var(--color-live) 10%, var(--color-bg));
   border: 1px solid var(--color-live);
@@ -1503,6 +1538,18 @@ button {
   border-radius: var(--radius-sm);
   padding: 0.75rem 1rem;
   font-size: 0.9rem;
+  animation: error-in 0.35s ease both;
+}
+
+@keyframes error-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 .empty-state {
@@ -1920,6 +1967,16 @@ button {
 @media (prefers-reduced-motion: reduce) {
   .live-head .dot,
   .caret {
+    animation: none;
+  }
+
+  .live-badge .dot.reconnecting,
+  .dot-reconnecting,
+  .session .sess-dot.dot-reconnecting {
+    animation: none;
+  }
+
+  .error-banner {
     animation: none;
   }
 }

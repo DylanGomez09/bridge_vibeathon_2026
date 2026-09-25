@@ -31,7 +31,7 @@ export default function AppShell({ initialPanel, theme, activeTheme, onThemeChan
     inicio: (
       <Home phase={session.phase} activeSessions={activeSessions} onNavigate={setActive} />
     ),
-    sesiones: <Sessions />,
+    sesiones: <Sessions phase={session.phase} connState={session.connState} />,
     microfono: <Microphone />,
     traduccion: <TranslationPanel {...session} {...prefs} />,
     ajustes: <Settings prefs={prefs} setPref={setPref} theme={theme} onThemeChange={onThemeChange} />,

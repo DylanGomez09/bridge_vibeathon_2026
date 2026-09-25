@@ -3,15 +3,33 @@ import { BridgeSocket } from "../lib/ws/bridge-socket.js"
 import { startMicCapture, stopMicCapture } from "../lib/audio/capture-mic.js"
 import { decodeFileToPcm16kMono } from "../lib/audio/decode-file.js"
 import { float32ToPcmChunks, pcmChunkDurationMs } from "../lib/audio/pcm.js"
+import { friendlyMessage } from "../lib/errors.js"
 import { debug, elapsedSec } from "../lib/debug.js"
 
-const READY_TIMEOUT_MS = 15_000
+const START_ACK_TIMEOUT_MS = 5_000
+// Tope de respaldo: el backend decide ready/failed/ended por su cuenta (~52s peor caso
+// con la config por defecto); este valor solo evita colgarse ante silencio total.
+const READY_BACKSTOP_MS = 120_000
 const FILE_PLAYBACK_RATE = 2
 const TURN_CHUNKS = 100
 const TURN_WAIT_MS = 20_000
+const RESYNC_SETTLE_MS = 400
+// El ack se vence cuando el backend se reinicia (tsx watch) justo al empezar la
+// sesión. En vez de mostrar un error, reintentamos una vez con un socket nuevo.
+const ACK_TIMEOUT_MESSAGE = "El servidor no respondió al iniciar la sesión"
+const START_RETRY_DELAY_MS = 2_000
+const START_MAX_RETRIES = 1
+
+const isRetryableStartError = (cause) => {
+  const raw = typeof cause === "string" ? cause : (cause?.message ?? "")
+  return raw === ACK_TIMEOUT_MESSAGE || /no respondió al iniciar|econnrefused|econnreset/i.test(raw)
+}
+
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 export function useBridgeSession() {
-  const [phase, setPhase] = useState("idle") // idle | connecting | live | ended | error
+  const [rawPhase, setRawPhase] = useState("idle") // idle | connecting | live | reconnecting | ended | error | failed
+  const [connState, setConnState] = useState("connected") // connected | reconnecting | offline
   const [error, setError] = useState(null)
   const [segments, setSegments] = useState([])
   const [currentOriginal, setCurrentOriginal] = useState(null)
@@ -23,18 +41,24 @@ export function useBridgeSession() {
   const socketRef = useRef(null)
   const workletRef = useRef(null)
   const stoppedRef = useRef(false)
+  const wantSessionRef = useRef(false)
+  const droppedRef = useRef(false)
+  const attachGateRef = useRef(Promise.resolve())
+  const gateUnlockRef = useRef(null)
   const originalRef = useRef("")
   const translationRef = useRef("")
   const segmentIdRef = useRef(0)
   const phaseRef = useRef("idle")
   const readyResolveRef = useRef(null)
   const readyRejectRef = useRef(null)
+  const readyBackstopRef = useRef(null)
+  const ackResolveRef = useRef(null)
   const streamStartRef = useRef(null)
   const segmentResolveRef = useRef(null)
 
   const applyPhase = (next) => {
     phaseRef.current = next
-    setPhase(next)
+    setRawPhase(next)
   }
 
   const settleReady = (kind, value) => {
@@ -64,20 +88,32 @@ export function useBridgeSession() {
     })
 
   const wireSocket = (socket) => {
-socket.on("status", (message) => {
-      if (message.phase === "error") {
-        setError(message.detail)
-        applyPhase("error")
+    socket.on("status", (message) => {
+      ackResolveRef.current?.()
+      if (message.phase === "error" || message.phase === "failed") {
+        setError(
+          message.detail
+            ? friendlyMessage(message.detail, message.detail)
+            : "Se perdió la conexión con la sesión.",
+        )
+        applyPhase(message.phase)
         settleReady("reject", new Error(message.detail ?? "Error de sesión"))
         return
       }
+      if (message.phase === "reconnecting") applyPhase("reconnecting")
       if (message.phase === "ready") {
         applyPhase("live")
         settleReady("resolve")
       }
       if (message.phase === "connecting") applyPhase("connecting")
-      if (message.phase === "ended") applyPhase("ended")
+      if (message.phase === "ended") {
+        applyPhase("ended")
+        settleReady("reject", new Error("La sesión se cerró antes de estar lista"))
+      }
     })
+
+    socket.on("started", () => ackResolveRef.current?.())
+
     socket.on("original", (message) => {
       const text = message.text ?? ""
       if (message.interim) {
@@ -87,10 +123,12 @@ socket.on("status", (message) => {
         setCurrentOriginal({ text, interim: false, ts: positionMs() })
       }
     })
+
     socket.on("translation", (message) => {
       translationRef.current = message.text ?? ""
       setCurrentTranslation(translationRef.current)
     })
+
     socket.on("segment", () => {
       const segment = {
         id: segmentIdRef.current++,
@@ -105,10 +143,66 @@ socket.on("status", (message) => {
       setCurrentTranslation("")
       segmentResolveRef.current?.()
     })
+
     socket.on("close", () => {
-      if (phaseRef.current !== "error") applyPhase("ended")
-      settleReady("reject", new Error("La sesiÃ³n se cerrÃ³"))
+      if (phaseRef.current !== "error" && phaseRef.current !== "failed") applyPhase("ended")
+      settleReady("reject", new Error("La sesión se cerró"))
     })
+
+    socket.on("reconnecting", () => {
+      setConnState("reconnecting")
+      droppedRef.current = true
+      attachGateRef.current = new Promise((resolve) => {
+        gateUnlockRef.current = resolve
+      })
+    })
+
+    socket.on("offline", () => {
+      setConnState("offline")
+      if (gateUnlockRef.current) {
+        gateUnlockRef.current()
+        gateUnlockRef.current = null
+      }
+      attachGateRef.current = Promise.resolve()
+    })
+
+    socket.on("connected", () => {
+      setConnState("connected")
+      if (droppedRef.current && wantSessionRef.current && !stoppedRef.current) {
+        droppedRef.current = false
+        attachGateRef.current = resyncSession()
+      } else if (gateUnlockRef.current) {
+        gateUnlockRef.current()
+        gateUnlockRef.current = null
+        attachGateRef.current = Promise.resolve()
+      }
+    })
+  }
+
+  const resyncSession = () => {
+    const task = (async () => {
+      try {
+        const socket = await getSocket()
+        socket.start()
+        applyPhase("connecting")
+        setError(null)
+        await new Promise((resolve) => setTimeout(resolve, RESYNC_SETTLE_MS))
+      } catch (cause) {
+        setError(friendlyMessage(cause, "No se pudo restablecer la sesión"))
+      }
+      if (gateUnlockRef.current) {
+        gateUnlockRef.current()
+        gateUnlockRef.current = null
+      }
+    })()
+    return task
+  }
+
+  const sendChunk = async (chunk) => {
+    await attachGateRef.current
+    const socket = socketRef.current
+    if (!socket) return false
+    return socket.sendAudioChunk(chunk)
   }
 
   const connectSocket = async () => {
@@ -120,41 +214,101 @@ socket.on("status", (message) => {
   }
 
   const getSocket = async () => {
-    if (socketRef.current?.ws?.readyState === WebSocket.OPEN) {
-      return socketRef.current
+    const existing = socketRef.current
+    if (existing && !existing.destroyed) {
+      if (existing.ws?.readyState === WebSocket.OPEN) return existing
+      await existing.waitOpen()
+      return existing
     }
     return connectSocket()
   }
 
-  const beginSession = async () => {
+  const beginSession = async (resume = false) => {
     setError(null)
     applyPhase("connecting")
-    setSegments([])
-    setCurrentOriginal(null)
-    setCurrentTranslation("")
-    setSourceInfo(null)
-    setProcessingFile(false)
-    setProgress(0)
-    streamStartRef.current = null
+    attachGateRef.current = Promise.resolve()
+    if (!resume) {
+      setSegments([])
+      setCurrentOriginal(null)
+      setCurrentTranslation("")
+      setSourceInfo(null)
+      setProcessingFile(false)
+      setProgress(0)
+      streamStartRef.current = null
+    }
     stoppedRef.current = false
+    wantSessionRef.current = true
+    ackResolveRef.current = null
 
-    const ready = new Promise((resolve, reject) => {
-      readyResolveRef.current = resolve
-      readyRejectRef.current = reject
-    })
-    const timeout = new Promise((_, reject) =>
-      setTimeout(reject, READY_TIMEOUT_MS, new Error("La sesiÃ³n tardÃ³ demasiado en estar lista")),
-    )
-
-    try {
+    const attemptOnce = async () => {
       const socket = await getSocket()
       socket.start()
-      await Promise.race([ready, timeout])
+
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          ackResolveRef.current = null
+          reject(new Error(ACK_TIMEOUT_MESSAGE))
+        }, START_ACK_TIMEOUT_MS)
+        ackResolveRef.current = () => {
+          clearTimeout(timer)
+          ackResolveRef.current = null
+          resolve()
+        }
+      })
+
+      const ready = new Promise((resolve, reject) => {
+        readyResolveRef.current = resolve
+        readyRejectRef.current = reject
+      })
+      const backstop = new Promise((_, reject) => {
+        readyBackstopRef.current = setTimeout(
+          reject,
+          READY_BACKSTOP_MS,
+          new Error("La sesión tardó demasiado en estar lista. Reconectando…"),
+        )
+      })
+      await Promise.race([ready, backstop])
+      clearTimeout(readyBackstopRef.current ?? undefined)
+      readyBackstopRef.current = null
       if (!streamStartRef.current) streamStartRef.current = performance.now()
+    }
+
+    try {
+      let attempt = 0
+      for (;;) {
+        try {
+          await attemptOnce()
+          break
+        } catch (cause) {
+          if (readyBackstopRef.current) {
+            clearTimeout(readyBackstopRef.current)
+            readyBackstopRef.current = null
+          }
+          settleReady("reject")
+          ackResolveRef.current = null
+          const canRetry =
+            attempt < START_MAX_RETRIES && !stoppedRef.current && isRetryableStartError(cause)
+          if (!canRetry) throw cause
+          attempt += 1
+          // El backend se reinició justo al empezar: el socket viejo quedó a medias.
+          // Lo descartamos para que el reintento pegue a una conexión sana.
+          socketRef.current?.close()
+          socketRef.current = null
+          await delay(START_RETRY_DELAY_MS)
+          applyPhase("connecting")
+          setError(null)
+        }
+      }
     } catch (cause) {
+      if (readyBackstopRef.current) {
+        clearTimeout(readyBackstopRef.current)
+        readyBackstopRef.current = null
+      }
       settleReady("reject")
-      setError(cause instanceof Error ? cause.message : String(cause))
-      applyPhase("error")
+      ackResolveRef.current = null
+      setError(friendlyMessage(cause, "No se pudo iniciar la sesión"))
+      const applied = phaseRef.current
+      if (applied !== "failed" && applied !== "ended" && applied !== "error") applyPhase("error")
       throw cause
     }
   }
@@ -166,13 +320,15 @@ socket.on("status", (message) => {
       return
     }
     try {
-      const worklet = await startMicCapture((chunk) => socketRef.current?.sendAudioChunk(chunk))
+      const worklet = await startMicCapture((chunk) => {
+        socketRef.current?.sendAudioChunk(chunk).catch(() => {})
+      })
       workletRef.current = worklet
       if (stoppedRef.current) {
         stopMicCapture()
       }
     } catch (cause) {
-      setError(cause?.message ?? "No se pudo acceder al micrÃ³fono")
+      setError(friendlyMessage(cause, "No se pudo acceder al micrófono"))
       applyPhase("error")
     }
   }
@@ -203,7 +359,12 @@ socket.on("status", (message) => {
       for (let index = 0; index < chunks.length; index++) {
         if (stoppedRef.current) break
         const start = performance.now()
-        socketRef.current?.sendAudioChunk(chunks[index])
+        const sent = await sendChunk(chunks[index])
+        if (!sent) {
+          setError("No se pudo restablecer la sesión: quedó sin conexión con el servidor.")
+          applyPhase("ended")
+          break
+        }
         setProgress((index + 1) / total)
         const wait = Math.max(0, step - (performance.now() - start))
         if (index < chunks.length - 1) {
@@ -229,21 +390,35 @@ socket.on("status", (message) => {
       setProcessingFile(false)
     } catch (cause) {
       setProcessingFile(false)
-      setError(cause?.message ?? "No se pudo decodificar el archivo")
+      setError(friendlyMessage(cause, "No se pudo procesar el archivo"))
       applyPhase("error")
     }
+    wantSessionRef.current = false
   }
 
   const stop = () => {
     stoppedRef.current = true
+    wantSessionRef.current = false
+    droppedRef.current = false
     stopMicCapture()
     const socket = socketRef.current
     segmentResolveRef.current?.()
     segmentResolveRef.current = null
+    ackResolveRef.current = null
+    if (readyBackstopRef.current) {
+      clearTimeout(readyBackstopRef.current)
+      readyBackstopRef.current = null
+    }
+    settleReady("reject", new Error("Sesión detenida"))
     socket?.endTurn()
     socket?.stop()
     socket?.close()
     socketRef.current = null
+    if (gateUnlockRef.current) {
+      gateUnlockRef.current()
+      gateUnlockRef.current = null
+    }
+    attachGateRef.current = Promise.resolve()
     workletRef.current = null
     setProcessingFile(false)
     setProgress(0)
@@ -253,8 +428,16 @@ socket.on("status", (message) => {
     applyPhase("ended")
   }
 
+  const phase =
+    connState === "offline"
+      ? "offline"
+      : connState === "reconnecting" || rawPhase === "reconnecting"
+        ? "reconnecting"
+        : rawPhase
+
   return {
     phase,
+    connState,
     error,
     segments,
     currentOriginal,

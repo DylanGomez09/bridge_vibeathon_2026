@@ -10,6 +10,10 @@ export interface BridgeConfig {
   bridgeResponseModality: ResponseModality;
   bridgeSourceLang: string;
   bridgeTargetLang: string;
+  reconnectMaxAttempts: number;
+  reconnectBaseDelayMs: number;
+  readyTimeoutMs: number;
+  staleSessionMs: number;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
@@ -22,5 +26,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
     bridgeResponseModality: modality === "audio" ? "audio" : "text",
     bridgeSourceLang: String(env.BRIDGE_SOURCE_LANG ?? "en"),
     bridgeTargetLang: String(env.BRIDGE_TARGET_LANG ?? "es"),
+    reconnectMaxAttempts: Math.max(0, Number(env.BRIDGE_RECONNECT_MAX_ATTEMPTS ?? 3)),
+    reconnectBaseDelayMs: Math.max(0, Number(env.BRIDGE_RECONNECT_BASE_DELAY_MS ?? 1000)),
+    readyTimeoutMs: Math.max(0, Number(env.BRIDGE_READY_TIMEOUT_MS ?? 15000)),
+    staleSessionMs: Math.max(0, Number(env.BRIDGE_STALE_SESSION_MS ?? 60000)),
   };
 }

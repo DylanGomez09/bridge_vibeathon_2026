@@ -19,7 +19,11 @@ export default function Controls({
   onDownloadSrt,
 }) {
   const fileRef = useRef(null)
-  const busy = phase === "connecting" || processingFile
+  const busy =
+    phase === "connecting" ||
+    phase === "reconnecting" ||
+    phase === "offline" ||
+    processingFile
   const percent = Math.round((progress ?? 0) * 100)
   const durationMs = sourceInfo?.durationMs ?? 0
   const elapsedMs = (progress ?? 0) * durationMs

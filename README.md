@@ -12,6 +12,34 @@ pnpm dev          # backend (tsx watch) :3001 + frontend (vite) :5173
 - **Backend**: `backend/.env` con `GEMINI_API_KEY=...` (ver "Configuración").
 - **Frontend**: `http://localhost:5173`. Debug por consola habilitado con `?debug=1`.
 
+## Audios de prueba
+
+Todos los clips de prueba viven en **`backend/assets/`**:
+
+| Archivo | Duración | Formato | Peso | Para qué sirve |
+|---|---|---|---|---|
+| `short-demo.wav` | 40,0 s | 16 kHz · mono · 16-bit | 1,22 MB | **Demo del jurado**: clip balanceado, da ~4 segmentos completos |
+| `short-talk.wav` | 10,0 s | 16 kHz · mono · 16-bit | 0,31 MB | Iteración rápida al debuggear (un solo turno) |
+| `talk.wav` | 355,0 s (5:55) | 16 kHz · mono · 16-bit | 10,83 MB | Charla completa; es el audio original del que salen los clips |
+| `sample.pcm` | ~3,0 s | PCM crudo 16 kHz · mono · 16-bit | 96,9 KB | **Default de los tests de consola** (`test:connection` y `test:pipeline`) |
+| `talk.webm` | — | WebM | 5,67 MB | Grabación original; ningún script la usa (sirve para probarla en la UI) |
+
+### Probar un clip en la UI
+
+Usá **"Subir archivo"** y elegí el clip. Para una prueba rápida, `short-talk.wav`; para el demo del jurado, `short-demo.wav`.
+
+### Probar un clip en los tests de consola
+
+Los tests aceptan un path como argumento. Si no lo pasás, usan `assets/sample.pcm`:
+
+```bash
+pnpm test:connection                                # usa backend/assets/sample.pcm
+pnpm test:connection backend/assets/short-talk.wav  # clip de 10 s
+pnpm test:pipeline backend/assets/short-demo.wav    # clip de 40 s
+```
+
+**Ojo**: los scripts de consola (`backend/src/audio/load-pcm.ts`) aceptan **solo `.pcm` y `.wav`**. El navegador acepta mucho más (`.mp3`, `.m4a`, `.ogg`, `.webm` y video `.mp4`, `.m4v`, `.mov`).
+
 ## Demo del jurado (protocolo)
 
 1. Levantar backend con logs de diagnóstico: `BRIDGE_DEBUG=1 pnpm dev` (filtra `[tscriber-verbose]`/`[ws-relay]` en la terminal del backend).
@@ -67,14 +95,19 @@ Límite honesto: la latencia por turno está dominada por la finalización de tu
 
 ```
 backend/
-  src/gemini/transcriber.ts   # sesión Lite de Gemini, merge + reset de traducción
+  src/gemini/transcriber.ts   # sesión Live de Gemini, merge + reset de traducción
   src/ws/handler.ts           # relay WS (navegador ↔ backend) con log [ws-relay]
   src/config.ts               # env → BridgeConfig
-  assets/short-demo.wav       # clip de demo (40s, 16kHz/mono/16-bit)
-  assets/short-talk.wav       # clip corto (10s)
-  assets/talk.wav             # charla completa (~355s, fuente de los clips)
+  src/errors.ts               # errores crudos → mensajes en español para la UI
+  src/audio/load-pcm.ts       # carga .pcm/.wav → PCM 16 kHz mono
+  assets/                     # clips de prueba (ver "Audios de prueba")
+  test-connection.ts          # smoke test contra la Gemini Live API
+  test-pipeline.ts            # prueba del pipeline de audio
 frontend/
-  src/hooks/useBridgeSession.js     # playFile: pacing 2× + turn-splitting
+  src/hooks/useBridgeSession.js     # playFile: pacing 2× + turn-splitting + retry
   src/lib/ws/bridge-socket.js       # protocolo WS (chunks binarios, endTurn, segment)
+  src/lib/audio/decode-file.js      # decodifica el archivo del navegador a PCM 16 kHz
+  src/lib/subtitles.js              # buildSrt + descarga del .srt
+  src/lib/errors.js                 # errores → mensajes en español
   src/lib/debug.js                  # logs gated por ?debug=1
 ```
